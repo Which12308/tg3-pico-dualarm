@@ -1,0 +1,2 @@
+# Ubuntu native IK environment. Windows portable preview: pip install .
+-r requirements-linux.txt

@@ -1,0 +1,8 @@
+{
+  "schema": "tg3_xarm_settings_v1",
+  "controller": "jointspace_ruckig_qp_controller",
+  "topic": "/jointspace_commands_Dual",
+  "velocity_cap_rad_s": 0.02,
+  "feedback_lead_rad": 0.03,
+  "limits_evidence": "Operator software caps for initial supported-arm trials; actual XARM velocity parameters and exact fourteen URDF joint limits must also be verified before enable. SDK algorithm manual sections 2.6, 4 and 7."
+}

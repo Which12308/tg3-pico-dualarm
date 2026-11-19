@@ -1,0 +1,14 @@
+# Install into this repository's venv with --no-user; do not alter factory Python.
+numpy==2.3.5
+PyYAML==6.0.3
+placo==0.9.26
+pin==3.8.0
+libpinocchio==3.8.0
+cmeel-boost==1.89.0
+coal==3.0.2
+libcoal==3.0.2
+eigenpy==3.12.0
+eiquadprog==1.3.0
+cmeel-urdfdom==4.0.1
+cmeel-tinyxml2==10.0.0
+meshcat==0.3.2

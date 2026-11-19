@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+recordings/
+artifacts/
+.test_tmp/
+.desktop/
+headset/generated_client/
+.headset_tools/
+manufacturer_research/

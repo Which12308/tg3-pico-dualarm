@@ -1,0 +1,8 @@
+{
+  "port": 8890,
+  "translation_scale": 1.0,
+  "orientation_scale": 1.0,
+  "mode": "pose",
+  "tracking_timeout_s": 0.15,
+  "source_age_limit_s": 0.12
+}

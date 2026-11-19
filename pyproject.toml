@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg3_pico_dualarm"
+version = "0.4.0"
+description = "PICO dual-arm teleoperation with explicit TianGong hardware boundaries"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3", "PyYAML>=6,<7"]
+
+[project.optional-dependencies]
+ik = ["placo==0.9.26; sys_platform == 'linux'", "cmeel-boost==1.89.0; sys_platform == 'linux'"]
+
+[project.scripts]
+tg3-vr = "tg3_pico_dualarm.cli:main"
+bridge_node = "tg3_pico_dualarm.ros_bridge:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tg3_pico_dualarm = ["assets/*.urdf", "web_assets/*.html", "web_assets/*.js", "web_assets/*.css"]
+

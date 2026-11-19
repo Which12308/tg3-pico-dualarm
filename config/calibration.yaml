@@ -1,0 +1,120 @@
+{
+  "heading_source": "head_at_neutral_start",
+  "recalibrate_after_tracking_space_reset": true,
+  "tool_offsets_calibrated": false,
+  "reference": "waist_pitch_link",
+  "position_weight": 1.0,
+  "orientation_weight": 1.0,
+  "posture_weight": 0.0001,
+  "controller_to_hand": {
+    "left": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "right": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "tcp_to_hand": {
+    "left": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "right": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "tool_reference": "urdf_tcp",
+  "controller_reference": "openxr_grip",
+  "reference_model_sha256": "ddeb5f101da23e73d4d9f1c9d7e29b890b4a81a2443b747336e31f673b47225c"
+}

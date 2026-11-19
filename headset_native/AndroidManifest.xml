@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+ package="edu.scu.tg3.wireless" android:versionCode="400" android:versionName="0.4.0">
+ <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="34" />
+ <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+ <uses-feature android:name="android.hardware.vr.headtracking" android:required="false" android:version="1" />
+ <uses-permission android:name="android.permission.INTERNET" />
+ <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+ <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+ <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+ <queries>
+  <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+  <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
+  <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
+ </queries>
+ <application android:label="@string/app_name" android:hasCode="true" android:allowBackup="false"
+  android:usesCleartextTraffic="true" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+  <activity android:name=".PairActivity" android:exported="true" android:screenOrientation="landscape">
+   <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+  </activity>
+  <activity android:name=".TeleopActivity" android:exported="false" android:screenOrientation="landscape"
+   android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
+   android:launchMode="singleTask" android:resizeableActivity="false"
+   android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+   <meta-data android:name="pvr.app.type" android:value="vr" />
+   <meta-data android:name="android.app.lib_name" android:value="tg3_openxr" />
+   <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" /><category android:name="com.picovr.intent.category.VR" /></intent-filter>
+  </activity>
+ </application>
+</manifest>

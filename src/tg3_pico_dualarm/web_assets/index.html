@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>PICO 双手柄采集</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+<main>
+  <p class="eyebrow">PICO 4 Ultra · 双臂输入</p>
+  <h1>双手柄采集</h1>
+  <p><strong>当前为离线测试，不驱动机器人。</strong></p>
+  <p>进入后可以看到周围环境。左右握持键分别使能对应手臂；松开后保持。先松开两个握持键、扳机与按键，再开始操作。</p>
+  <div class="actions"><button id="start" disabled>开始采集双手柄</button><button id="stop" disabled>退出采集</button></div>
+  <section class="panel" aria-live="polite"><strong id="status">正在检查浏览器…</strong><p id="detail">请在头显浏览器中打开本机页面。</p></section>
+  <div class="hands"><section class="panel"><h2>左手柄</h2><pre id="left">尚未采集</pre></section><section class="panel"><h2>右手柄</h2><pre id="right">尚未采集</pre></section></div>
+  <section class="panel"><h2>头部与连接</h2><pre id="head">尚未采集</pre></section>
+  <section class="panel"><h2>离线双臂模型与目标</h2><canvas id="model-canvas" width="700" height="350"></canvas><pre id="runtime">等待控制端状态</pre></section>
+  <p class="muted">此页面只采集输入。机器人接管状态由控制端确认。失去跟踪、USB 连接或页面焦点后，需要松开对应手柄，再按住重新使能。</p>
+  <p class="muted">握持键：使能；扳机：抓握输入；右 A/B、左 X/Y：独立记录；摇杆：独立记录。具体机器人动作由控制端映射。</p>
+</main>
+<canvas id="xr-canvas" aria-hidden="true"></canvas>
+</body>
+</html>

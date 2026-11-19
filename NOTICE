@@ -1,0 +1,16 @@
+This review snapshot omits the robot models and binary assets described in the original notice below.
+
+The MIT license applies to newly authored project source code and documentation.
+
+The supplied Tiangong URDF was obtained from the user's robot/workspace and is
+included for reproducing that laboratory's kinematic checks. Original model
+hash: ddeb5f101da23e73d4d9f1c9d7e29b890b4a81a2443b747336e31f673b47225c.
+Its original ownership and licensing are retained. This project does not assert
+or grant a new distribution license for that robot description or mesh assets.
+No mesh binaries are bundled. Generated kinematic URDFs derive from that model.
+
+Placo, Pinocchio, CMeel, XRoboToolkit and the ROS ecosystem are separate
+dependencies with their respective licenses. Reference/reuse decisions and
+the licenses inspected are recorded in docs/upstream_review.md. The new dual-arm
+solver invokes Placo directly; it does not claim the previously vendored
+XRoboToolkit controller source is part of this repository's newly authored code.

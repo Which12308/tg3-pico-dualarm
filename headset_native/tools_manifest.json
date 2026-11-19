@@ -1,0 +1,63 @@
+{
+  "schema": "tg3-android-tools-v1",
+  "host": "windows-x86_64",
+  "jdk_min_major": 17,
+  "packages": [
+    {
+      "id": "platforms;android-34",
+      "url": "https://dl.google.com/android/repository/platform-34-ext7_r02.zip",
+      "archive": "platform-34-ext7_r02.zip",
+      "size": 63180079,
+      "sha1": "f09b07da8aea238a81b71d6fedb815e13aa13e58",
+      "sha256": "5323311cc3e4ad614f0b8053c72b651726f3422448cedd39e48f00737cda8ad0",
+      "allowed_roots": [
+        "android-34"
+      ],
+      "installed_files": {
+        "android-34/android.jar": "6cea1df3efb77103ac3e2beb9bf4718964b0e0869ab16d39d29d5cbae1c147ad",
+        "android-34/source.properties": "ed679a4634da4ab755f33ec6d1b7ac21f279e45cf0a75349f6205efee332e608"
+      },
+      "uncompressed_size": 99081264
+    },
+    {
+      "id": "build-tools;34.0.0",
+      "url": "https://dl.google.com/android/repository/build-tools_r34-windows.zip",
+      "archive": "build-tools_r34-windows.zip",
+      "size": 58253258,
+      "sha1": "62cfde1b6fcc3ad12a4d2ba1b537e752768bfd47",
+      "sha256": "9be665ad74ef22bf0e489b37db465074484df79b95f26d759945d5c25a47b326",
+      "allowed_roots": [
+        "android-14"
+      ],
+      "installed_files": {
+        "android-14/aapt.exe": "2a9bd1798d3841c7592d995c87fd1fb92397cdb700f076c51b9e9e722f9eb82c",
+        "android-14/aapt2.exe": "4c7300d84054aa5e970323166cd078c88cf653110e15a30fbe9f8fe55a6857c0",
+        "android-14/zipalign.exe": "0876c4652cd53d794a89e091be400ecb03d47c5209a82253c17834fbbd17f8a0",
+        "android-14/lib/d8.jar": "d43c8a94c9b1f1da1a7cc49c32b81e8cee1708b37ee8b530a81a0688222b42c0",
+        "android-14/lib/apksigner.jar": "eefdd6aed9db9fb849e4c98a50d8741e19d1b674ba6547220bcb9c3ed152123a"
+      },
+      "uncompressed_size": 143207136
+    },
+    {
+      "id": "ndk;26.3.11579264",
+      "url": "https://dl.google.com/android/repository/android-ndk-r26d-windows.zip",
+      "archive": "android-ndk-r26d-windows.zip",
+      "size": 665022840,
+      "sha1": "c7ea35ffe916082876611da1a6d5618d15430c29",
+      "sha256": "9b285da57a36818cb65ea5b93ec74f8138f48a40182ff2994f6aade4580ed597",
+      "allowed_roots": [
+        "android-ndk-r26d"
+      ],
+      "installed_files": {
+        "android-ndk-r26d/source.properties": "c16df8635bca2590bb8c2bcc67aaef99f853c71f2d86ff4603189780c45a6e4e",
+        "android-ndk-r26d/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe": "52d04034c7650ba4ec937def6db1612dc55a062db1769c8bae1507d8da80780b",
+        "android-ndk-r26d/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe": "f94e30b77820128e536e96e38473e981c92df5e5fa6b0df461d168b475e89038",
+        "android-ndk-r26d/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe": "2ac7e94a1445f2480c185b6777d1cd774e9b5eb93a123093de969a5e7f390a4a",
+        "android-ndk-r26d/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-readelf.exe": "672bc87fe138925f71d3227abd6a82d083076b3c7d612eb2cd0f79448dec317e",
+        "android-ndk-r26d/sources/android/native_app_glue/android_native_app_glue.c": "36b26c94ae8a580d3550dfd3e320c1ebf304023fdcec4fe38336d06b2736b5b7",
+        "android-ndk-r26d/sources/android/native_app_glue/android_native_app_glue.h": "220c1ff3542230ed108502b44fff90f4cf75e4ac26ca511c5c9ab086fdcfc64d"
+      },
+      "uncompressed_size": 2087944696
+    }
+  ]
+}

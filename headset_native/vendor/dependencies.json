@@ -1,0 +1,28 @@
+{
+  "loader_url": "https://repo.maven.apache.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.43/openxr_loader_for_android-1.1.43.aar",
+  "loader_sha256": "7e1b36141f9a4f1fa4a7e061936344fd9fcd36bce6c47eae2ad09812736167b6",
+  "stb_commit": "9600522de53973336fa033a289858a4354cbb04c",
+  "stb_sha256": "f26a20fbbf1aee3e270a83d1e69ecc2a66eb9415aee718f2b7f58da5d6704848",
+  "openxr_sdk_commit": "781f2eab3698d653c804ecbd11e0aed47eaad1c6",
+  "sdk_source_reference_commit": "20a38abb24aa8f4d7738b52c7706de2ada68ae6c",
+  "files": {
+    "libopenxr_loader.so": "713e3bb8d955254c670acc1c4899a65cb8c930e97dd9958bf37ea922d72b7a06",
+    "stb_easy_font.h": "f26a20fbbf1aee3e270a83d1e69ecc2a66eb9415aee718f2b7f58da5d6704848",
+    "LICENSES/Apache-2.0.txt": "406e740a1c88320a2812cd3dae908abdcbe1044b1d6393a90e8c6ef229bd4cf2",
+    "LICENSES/BSD-3-Clause.txt": "20f7699c80709e2fec384a67ed87ee02254caceedf574c817fbe604f8cdd942f",
+    "LICENSES/BSL-1.0.txt": "ca94d9245a342b2e9a8f0edeaec3dd30a8fa97734dec0b9a330795d3bcc18a6f",
+    "LICENSES/CC-BY-4.0.txt": "0ef7814bce4078681833dd597a960fda6f81492a6fbfffbaa913ddbe56125588",
+    "LICENSES/CC0-1.0.txt": "42d7f40b47124b151d055b579fc4bf50fa9090b15dfc3dd57088ca0d9408da7e",
+    "LICENSES/ISC.txt": "d3d24a1d385cf8ac3c07ff5df6068bc7f1151facbd7ea8dcab14c3d5feb919ec",
+    "LICENSES/LicenseRef-jsoncpp-public-domain.txt": "5dd2df78b43c85aef22146eb7c667fea6c57e106dde0ef9ba6936a8927c93f4b",
+    "LICENSES/LicenseRef-Khronos-Free-Use-License-for-Software-and-Documentation.txt": "cf32bfbbb24d602d7eadbc4d501720e1b6eca4c8e344c5988c4edae6a03561be",
+    "LICENSES/LicenseRef-KhronosSpecCopyright-WithNormativeWording-v10.txt": "4b2d5152572feb7928fdf7a2b1a73d9b3771b6c98818054372ab523b93d02644",
+    "LICENSES/MIT.txt": "0459805ebfeff6e7cbe7a1913fe79e75ad192965dcfebceac11ec4c233acf53c",
+    "LICENSES/OFL-1.1-RFN.txt": "ba0acac9cabc842612deb8ca19f6a79a352de690b2867a3f0a2bedcc59297c5b",
+    "LICENSES/Unlicense.txt": "400f5d8e311922cb34395c4c6f36b2a520f14fbab64393beac27cd9c1938f0a8",
+    "LICENSES/Zlib.txt": "228d112139d15f8b0a51da82de4c002a0252f5cdec9ebef26bd0d05cfe73bcee",
+    "openxr/openxr.h": "80145a0a76c6938b1de22b6846aa32cd8dcf28bc0f79ae84667e42219af05dba",
+    "openxr/openxr_platform.h": "2a798e9b3ad64861711441197ec330715b123a3abcca01f34bcc17ccee3fd38a",
+    "openxr/openxr_platform_defines.h": "d9cb4c72dc145dd2403ad14cc0c212a0a1f8f057c20d4135b33b54e726b621ef"
+  }
+}

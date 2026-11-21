@@ -60,9 +60,15 @@ def run(args, stop=None):
             model.restrict_joint_limits(*bounds)
             joint_speed=min(joint_speed,min(bundle.limits.velocity))
             feedback_lead=min(feedback_lead,min(bundle.limits.feedback_lead))
+        feedback_gate=None
         if xarm_settings:
             joint_speed=min(joint_speed,min(xarm_settings.velocity_cap))
             feedback_lead=min(feedback_lead,min(xarm_settings.feedback_lead))
+            # XARM submit re-reads feedback and rejects any joint beyond
+            # feedback_lead. Limit filter targets to a narrower measured window
+            # so feedback moving between filter and submit does not trip it.
+            feedback_gate=feedback_lead
+            feedback_lead=feedback_lead-xarm_settings.feedback_lead_reserve
         from .kinematics_worker import ProcessKinematics
         calibration=config['calibration']
         from .tool_setup import reference_status
@@ -133,7 +139,8 @@ def run(args, stop=None):
             joint_speed=joint_speed,joint_acceleration=safety['joint_acceleration_rad_s2'],
             feedback_lead=feedback_lead,translation_speed=safety['translation_speed_m_s'],
             rotation_speed=safety['rotation_speed_rad_s'],feedback_timeout=safety['feedback_timeout_s']),
-            boundary_hold=bool(xarm and getattr(getattr(robot,'transport',None),'holding_profile',None)))
+            boundary_hold=bool(xarm and getattr(getattr(robot,'transport',None),'holding_profile',None)),
+            feedback_gate=feedback_gate)
         controller.workspace_extent=safety['workspace_extent_m']
         gateway=InputGateway(role='relay',key=key,policy=input_policy)
         if admission:admission.frame_provider=gateway.tracking.sample

@@ -31,10 +31,20 @@ class JointSafetyFilter:
     layer's explicit immediate hold. Those stop events do not use this active
     trajectory filter and must not be described as acceleration-limited motion.
     """
-    def __init__(self,model,limits=None,*,boundary_hold=False):
+    def __init__(self,model,limits=None,*,boundary_hold=False,feedback_gate=None):
         self.model=model; self.config=limits or SafetyLimits()
         if boundary_hold and self.config.joint_speed>.02:
             raise ValueError('boundary_hold_requires_low_speed_candidate')
+        # feedback_gate is the downstream absolute admission limit (for XARM
+        # the 0.03 rad submit check). config.feedback_lead is the narrower
+        # window new targets are limited to, leaving a reserve for feedback
+        # that moves between this filter and the submit-time re-read. The
+        # gate itself is never widened here.
+        gate=self.config.feedback_lead if feedback_gate is None else feedback_gate
+        if (isinstance(gate,bool) or not isinstance(gate,(int,float)) or not math.isfinite(gate)
+                or gate<self.config.feedback_lead or gate>.035):
+            raise ValueError('invalid_feedback_gate')
+        self.feedback_gate=float(gate)
         self.boundary_hold=boundary_hold;self.last_diagnostics={}
 
     def step(self,proposed,measured,previous,previous_velocity,dt):
@@ -42,13 +52,13 @@ class JointSafetyFilter:
         if any(v.shape!=(14,) or not np.all(np.isfinite(v)) for v in values):
             raise SafetyError('nonfinite_or_wrong_joint_state')
         proposed,measured,previous,previous_velocity=values
-        self.last_diagnostics={'boundary_holds':[]}
+        self.last_diagnostics={'boundary_holds':[],'window_limited':[],'outside_window':[]}
         c=self.config
         if not math.isfinite(dt) or not 0<dt<=.05: raise SafetyError('tick_overrun')
         limits=np.asarray(self.model.limits)
         if np.any(measured<limits[:,0]) or np.any(measured>limits[:,1]):
             raise SafetyError('measured_outside_limits')
-        if np.max(abs(previous-measured))>c.feedback_lead+1e-8:
+        if np.max(abs(previous-measured))>self.feedback_gate+1e-8:
             raise SafetyError('previous_target_outside_feedback_window')
         result=previous.copy();velocity=np.zeros(14)
         for side,offset in (('left',0),('right',7)):
@@ -56,6 +66,21 @@ class JointSafetyFilter:
             requested=(proposed[sl]-previous[sl])/dt
             low=np.maximum(limits[sl,0],measured[sl]-c.feedback_lead)
             high=np.minimum(limits[sl,1],measured[sl]+c.feedback_lead)
+            # A previous target between the window and the gate (feedback
+            # moved away from it) may stay or move back toward the window,
+            # never further out. No jump is projected; the velocity box below
+            # still applies, and an infeasible case is handled as before.
+            outside=(previous[sl]<low)|(previous[sl]>high)
+            for j in np.flatnonzero(outside):
+                self.last_diagnostics['outside_window'].append(dict(side=side,joint_index=int(offset+j),
+                    target_rad=float(previous[offset+j]),measured_rad=float(measured[offset+j]),
+                    difference_rad=float(previous[offset+j]-measured[offset+j]),window_rad=c.feedback_lead))
+            low=np.minimum(low,previous[sl]);high=np.maximum(high,previous[sl])
+            position_low=(low-previous[sl])/dt;position_high=(high-previous[sl])/dt
+            for j in np.flatnonzero((requested<position_low-1e-12)|(requested>position_high+1e-12)):
+                self.last_diagnostics['window_limited'].append(dict(side=side,joint_index=int(offset+j),
+                    requested_rad=float(proposed[offset+j]),measured_rad=float(measured[offset+j]),
+                    window_rad=c.feedback_lead))
             acceleration=c.joint_acceleration*dt
             # Deceleration and sign changes are bounded by the same velocity
             # box as acceleration. Scaling an increment toward zero after this

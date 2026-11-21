@@ -4,5 +4,6 @@
   "topic": "/jointspace_commands_Dual",
   "velocity_cap_rad_s": 0.02,
   "feedback_lead_rad": 0.03,
+  "feedback_lead_reserve_rad": 0.005,
   "limits_evidence": "Operator software caps for initial supported-arm trials; actual XARM velocity parameters and exact fourteen URDF joint limits must also be verified before enable. SDK algorithm manual sections 2.6, 4 and 7."
 }

@@ -88,7 +88,7 @@ class Teleoperation:
         if verified:
             self.filter=JointSafetyFilter(self.model,replace(self.filter.config,
                 joint_speed=min(self.filter.config.joint_speed,min(verified))),
-                boundary_hold=self.filter.boundary_hold)
+                boundary_hold=self.filter.boundary_hold,feedback_gate=getattr(self.filter,'feedback_gate',None))
         if self.manufacturer_grasp:self.manufacturer_grasp.initialize()
 
     def tick(self,frame,dt=.02):
@@ -183,7 +183,13 @@ class Teleoperation:
                 # Record the actual OEM hold target, not the pre-hold seed.
                 command=JointCommand(tuple(map(float,target)),tuple(map(float,velocity)),now)
             else:accepted=self.robot.submit(command)
-            if not accepted.accepted:return self.disarm('robot_rejected:'+accepted.reason)
+            if not accepted.accepted:
+                # Joint, target, measured angle and feedback time of a lead
+                # rejection, when the robot reports one for this command.
+                rejection=getattr(self.robot,'last_submit_rejection',None)
+                details=(dict(submit_rejection=dict(rejection),safety=deepcopy(self.filter.last_diagnostics))
+                         if isinstance(rejection,dict) and rejection.get('command_stamp')==command.stamp else None)
+                return self.disarm('robot_rejected:'+accepted.reason,details=details)
             self.target,self.velocity=target,velocity
             self._active=mapping.active.copy()
             self.last_status=dict(state='hardware' if self._hardware else 'dry_run',active=mapping.active,reasons=mapping.reasons,

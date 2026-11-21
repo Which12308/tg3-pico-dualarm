@@ -22,6 +22,8 @@ EMPTY=('empty_L_controller','empty_R_controller')
 # rclcpp returns an empty GetParameters response if any requested name is
 # undeclared, so do not mix speculative aliases into this reviewed contract.
 PARAMETERS=('vel_limits','acc_limits','jerk_limits','joints')
+# Joint order 0..13 maps to motor ids 11-17 (left) and 21-27 (right).
+MOTOR_IDS=tuple(range(11,18))+tuple(range(21,28))
 
 
 def _vector(values,label,positive=False):
@@ -48,6 +50,9 @@ class XArmSettings:
     audit_interval: float=.5
     status_timeout: float=1.
     transition_timeout: float=5.
+    # Targets are limited to measured +/- (feedback_lead - reserve) before
+    # submit; the submit check itself stays at feedback_lead.
+    feedback_lead_reserve: float=.005
 
     def __post_init__(self):
         for name in ('velocity_cap','lower','upper','feedback_lead'):
@@ -65,6 +70,11 @@ class XArmSettings:
                 raise ValueError('invalid_xarm_'+name)
         if self.status_timeout<self.audit_interval+2*self.service_timeout:
             raise ValueError('xarm_status_timeout_too_short_for_audit')
+        reserve=self.feedback_lead_reserve
+        if (isinstance(reserve,bool) or not isinstance(reserve,Real) or not math.isfinite(reserve)
+                or not 0<=reserve<=.01 or reserve>=min(self.feedback_lead)):
+            raise ValueError('invalid_xarm_feedback_lead_reserve')
+        object.__setattr__(self,'feedback_lead_reserve',float(reserve))
 
 
 def _fields(cls):return cls.get_fields_and_field_types()
@@ -289,6 +299,9 @@ class XArmAdapter:
         self._controllers=None;self._controller_stamp=None;self._parameter_stamp=None;self._auto_stamp=None
         self._next_audit=0.;self._parameter_values=None;self._velocity=None;self._deactivate=()
         self.verified_velocity=None
+        # Last submit rejected by the feedback lead check; kept across stop so
+        # the operator can read which joint exceeded and against what feedback.
+        self.last_submit_rejection=None
         from .brainco_adapter import BrainCoHandAdapter
         self.hands=BrainCoHandAdapter(node,feedback,parent=self,config_path=hands_config,clock=clock,
                                     command_timeout=settings.command_timeout)
@@ -541,7 +554,14 @@ class XArmAdapter:
                     if not self.limits.lower[i]<=q<=self.limits.upper[i]:raise RuntimeError('xarm_joint_bound_exceeded')
                     if abs(v)>self._velocity[i]+1e-9 or abs(q-self._target[i])>self._velocity[i]*dt+1e-9:
                         raise RuntimeError('xarm_joint_velocity_cap_exceeded')
-                    if abs(q-state.positions[i])>self.limits.feedback_lead[i]:raise RuntimeError('xarm_feedback_lead_exceeded')
+                    if abs(q-state.positions[i])>self.limits.feedback_lead[i]:
+                        self.last_submit_rejection=dict(reason='xarm_feedback_lead_exceeded',
+                            joint_index=i,motor_id=MOTOR_IDS[i],side='left' if i<7 else 'right',
+                            target_rad=float(q),measured_rad=float(state.positions[i]),
+                            difference_rad=float(q-state.positions[i]),limit_rad=float(self.limits.feedback_lead[i]),
+                            feedback_stamp=state.stamp,feedback_age_s=now-state.stamp,checked_at=now,
+                            command_stamp=command.stamp,previous_target_rad=(None if self._target is None else float(self._target[i])))
+                        raise RuntimeError('xarm_feedback_lead_exceeded')
                 self.transport.publish(command.positions)
                 self._target=command.positions;self._last_stamp=command.stamp;self._last_output=now
                 return SubmitResult(True,'xarm_fourteen_joint_target_published')
@@ -632,6 +652,7 @@ class XArmAdapter:
                 hardware_arm_enable_acknowledged=self._enabled,services=dict(self.transport.names),
                 hand_output_enabled=self.hands.hardware_writes_enabled,hands=self.hands.status(),
                 commanded_joint_positions=self._target,
+                last_submit_rejection=self.last_submit_rejection,
                 verified_velocity=self.verified_velocity,
                 manipulator_warning=getattr(self.transport,'last_warning',None))
 

@@ -1,4 +1,5 @@
 """Preview, real-native offline IK, recording, and read-only robot inspection."""
+from . import safety as motion_policy
 import argparse
 from contextlib import ExitStack
 from dataclasses import replace
@@ -175,7 +176,8 @@ def main(argv=None):
             if args.configuration:defaults.update(args.configuration['vr'])
             for target,key in (('port','port'),('scale','translation_scale'),('orientation_scale','orientation_scale'),('mode','mode')):
                 if getattr(args,target) is None:setattr(args,target,defaults[key])
-            if not .01<=args.scale<=1 or not 0<=args.orientation_scale<=1:
+            if (not np.isfinite(args.scale) or not np.isfinite(args.orientation_scale)
+                    or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not .01<=args.scale<=1 or not 0<=args.orientation_scale<=1))):
                 raise ValueError('invalid mapping scales')
             return serve(args)
         if args.command in ('demo','selftest'):

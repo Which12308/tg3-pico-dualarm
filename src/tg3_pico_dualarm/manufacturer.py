@@ -4,6 +4,7 @@ The output transport really publishes the inspected ArmCtrl/SetMotorMulti
 messages. It remains unusable without a separately supplied, verified factory
 control driver. The public SDK currently does not provide that driver.
 """
+from . import safety as motion_policy
 from dataclasses import dataclass
 import math
 from numbers import Real
@@ -247,6 +248,10 @@ class ManufacturerAdapter:
     def _check(self):
         now=self.clock()
         if not self.hardware_writes_enabled:raise ValueError('hardware_output_disabled')
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+            state=self.feedback.read_state()
+            if state.estop is True:raise ValueError('physical_estop')
+            return now,self.feedback.snapshot(require_hands=self.profiles)
         if self._last_output is None or not 0<=now-self._last_output<=self.limits.watchdog_timeout:
             raise ValueError('manufacturer_command_watchdog_expired')
         status=self.driver.read_status();now=self.clock();status.validate_estop(now,self.limits.ownership_timeout)
@@ -263,6 +268,11 @@ class ManufacturerAdapter:
             if not isinstance(command,JointCommand):raise TypeError('validated_JointCommand_required')
             try:
                 now,snapshot=self._check()
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.transport.publish_arm(command)
+                    self._last_target=command.positions;self._last_output=now;self._last_arm_output=now;self._last_command_stamp=command.stamp
+                    self.state='armed'
+                    return SubmitResult(True,'published_through_factory_limits_external')
                 if not 0<=now-command.stamp<=self.limits.command_timeout:raise ValueError('stale_or_future_joint_command')
                 if self._last_command_stamp is not None and command.stamp<=self._last_command_stamp:
                     raise ValueError('replayed_joint_command')
@@ -291,13 +301,13 @@ class ManufacturerAdapter:
                 now,snapshot=self._check()
                 if side not in self.profiles:raise ValueError('hand_profile_missing')
                 if operation not in (None,'close','open'):raise ValueError('unknown_hand_operation')
-                if type(intent_stamp) not in (int,float) or not math.isfinite(intent_stamp) or not 0<=now-intent_stamp<=self.limits.command_timeout:
+                if type(intent_stamp) not in (int,float) or not math.isfinite(intent_stamp) or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0<=now-intent_stamp<=self.limits.command_timeout):
                     raise ValueError('stale_or_invalid_hand_intent')
-                if side in self._last_hand_intent and intent_stamp<=self._last_hand_intent[side]:
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and side in self._last_hand_intent and intent_stamp<=self._last_hand_intent[side]:
                     return SubmitResult(False,'no_new_hand_intent')
                 profile=self.profiles[side]
                 dt=min(.05,now-self._last_hand_output[side])
-                if dt<=0:raise ValueError('nonadvancing_hand_clock')
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and dt<=0:raise ValueError('nonadvancing_hand_clock')
                 measured=snapshot['hands'][side]['feedback']['positions']
                 values,floating,diagnostics=limit_hand_target(profile,closure,operation=operation,
                     previous=self.hand_positions[side],floating=self._hand_float[side],measured=measured,
@@ -320,9 +330,9 @@ class ManufacturerAdapter:
                 # would turn a compliant arm's drift into a moving hold target.
                 target=self._last_target if self.state=='holding' else snapshot['positions']
                 if target is None:raise ValueError('manufacturer_hold_target_missing')
-                if any(not low<=q<=high for q,low,high in zip(target,self.limits.lower,self.limits.upper)):
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and any(not low<=q<=high for q,low,high in zip(target,self.limits.lower,self.limits.upper)):
                     raise ValueError('manufacturer_hold_outside_joint_limits')
-                if any(abs(q-p)>lead for q,p,lead in zip(target,snapshot['positions'],self.limits.feedback_lead)):
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and any(abs(q-p)>lead for q,p,lead in zip(target,snapshot['positions'],self.limits.feedback_lead)):
                     raise ValueError('manufacturer_hold_feedback_lead_violation')
                 result=self.driver.hold(tuple(target))
                 if not isinstance(result,FactoryResult) or result.acknowledged is not True:
@@ -333,6 +343,7 @@ class ManufacturerAdapter:
                 return self._fault('manufacturer_hold_failed:'+str(exc))
 
     def check_watchdog(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return False
         with self.lock:
             if self.hardware_writes_enabled:
                 try:self._check()
@@ -340,7 +351,10 @@ class ManufacturerAdapter:
                     self._fault('manufacturer_watchdog:'+str(exc));return True
             return self.state=='fault'
 
-    def _fault(self,reason):
+    def _fault(self,reason,*,manual=False):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY and not manual and 'physical_estop' not in str(reason):
+            self.reason=str(reason)
+            return SubmitResult(False,self.reason)
         self.state='fault';self.reason=str(reason)
         self._stop_confirmed=True
         transport,self.transport=self.transport,None
@@ -362,7 +376,7 @@ class ManufacturerAdapter:
     def disarm(self,reason='operator_disabled'):
         with self.lock:
             if self.state=='disabled':return SubmitResult(True,'already_disabled')
-            result=self._fault(reason)
+            result=self._fault(reason,manual=True)
             if self._stop_confirmed:
                 self.state='disabled'
                 return SubmitResult(True,'manufacturer_stop_and_release_acknowledged')

@@ -3,6 +3,7 @@
 This module never imports the old bottle controller and never creates a ROS
 publisher. A six-channel manufacturer's calibration is required for motors.
 """
+from . import safety as motion_policy
 from dataclasses import dataclass
 import math
 from .input_validation import validate_frame
@@ -49,10 +50,10 @@ class ContinuousHands:
         self.invalidate()
 
     def update(self, frame, now, dt):
-        if type(dt) not in (int, float) or not math.isfinite(dt) or not 0 < dt <= .1:
+        if type(dt) not in (int, float) or not math.isfinite(dt) or (dt<=0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and dt>.1)):
             self.invalidate()
             return self.status('invalid_hand_tick')
-        valid = bool(frame and frame.focused and 0 <= now-frame.received_at+frame.source_age_s <= self.policy.total_age_s)
+        valid = bool(frame and (motion_policy.LIMITS_MANAGED_EXTERNALLY or (frame.focused and 0 <= now-frame.received_at+frame.source_age_s <= self.policy.total_age_s)))
         if frame is not None:
             try:validate_frame(frame,now,self.policy)
             except (ValueError,TypeError):valid=False
@@ -70,7 +71,8 @@ class ContinuousHands:
                 self.goal[side] = self.closure[side]
                 self.opening[side] = False
                 self.source_ids[side] = item.source_id
-            if not item.connected or not item.tracked or item.release_required:
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY:self.ready[side]=True
+            if not item.connected or not item.tracked or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and item.release_required):
                 self.ready[side] = False
                 self.goal[side] = self.closure[side]
                 self.opening[side] = False
@@ -93,7 +95,7 @@ class ContinuousHands:
                 self.goal[side] = self.closure[side]
             delta = self.goal[side]-self.closure[side]
             rate = self.rates[0 if delta >= 0 else 1]
-            self.closure[side] += max(-rate*dt, min(rate*dt, delta))
+            self.closure[side] += delta if motion_policy.LIMITS_MANAGED_EXTERNALLY else max(-rate*dt, min(rate*dt, delta))
             if self.closure[side] <= 0.:self.opening[side] = False
             reasons[side] = 'opening' if delta < 0 else 'closing' if delta > 0 else 'holding'
         return self.status(reasons)

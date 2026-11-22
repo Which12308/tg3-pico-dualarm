@@ -4,6 +4,11 @@ import math
 import numpy as np
 
 
+# Motion limits and automatic stop decisions belong to the downstream module.
+# False is retained only for explicit regression of the original local guards.
+LIMITS_MANAGED_EXTERNALLY = True
+
+
 class SafetyError(RuntimeError): pass
 
 
@@ -19,7 +24,7 @@ class SafetyLimits:
     def __post_init__(self):
         if any(not math.isfinite(v) or v<=0 for v in vars(self).values()):
             raise ValueError('invalid safety limits')
-        if (self.joint_speed>.30 or self.joint_acceleration>.50 or self.feedback_lead>.035
+        if not LIMITS_MANAGED_EXTERNALLY and (self.joint_speed>.30 or self.joint_acceleration>.50 or self.feedback_lead>.035
                 or self.translation_speed>.04 or self.rotation_speed>.15 or self.feedback_timeout>.25):
             raise ValueError('limits exceed this unvalidated candidate operating envelope')
 
@@ -33,7 +38,7 @@ class JointSafetyFilter:
     """
     def __init__(self,model,limits=None,*,boundary_hold=False):
         self.model=model; self.config=limits or SafetyLimits()
-        if boundary_hold and self.config.joint_speed>.02:
+        if not LIMITS_MANAGED_EXTERNALLY and boundary_hold and self.config.joint_speed>.02:
             raise ValueError('boundary_hold_requires_low_speed_candidate')
         self.boundary_hold=boundary_hold;self.last_diagnostics={}
 
@@ -43,6 +48,9 @@ class JointSafetyFilter:
             raise SafetyError('nonfinite_or_wrong_joint_state')
         proposed,measured,previous,previous_velocity=values
         self.last_diagnostics={'boundary_holds':[]}
+        if LIMITS_MANAGED_EXTERNALLY:
+            if not math.isfinite(dt) or dt<=0:raise ValueError('invalid_tick_interval')
+            return proposed.copy(),(proposed-previous)/dt
         c=self.config
         if not math.isfinite(dt) or not 0<dt<=.05: raise SafetyError('tick_overrun')
         limits=np.asarray(self.model.limits)

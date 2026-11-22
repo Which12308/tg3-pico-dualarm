@@ -11,6 +11,7 @@ It is not a hard real-time guarantee. The worker has no ROS or actuator access.
 """
 from __future__ import annotations
 
+from . import safety as motion_policy
 from dataclasses import dataclass, field
 import multiprocessing as mp
 import queue
@@ -28,6 +29,7 @@ DEFAULT_WAIT_S = .035
 
 def _native_factory(options):
     from .kinematics import Kinematics
+    motion_policy.LIMITS_MANAGED_EXTERNALLY=options.pop('_external_limits',True)
     return Kinematics(**options)
 
 
@@ -135,7 +137,7 @@ class ProcessKinematics:
         self.model = DualArmModel(modelroot)
         if joint_limits is not None:
             self.model.restrict_joint_limits(*joint_limits)
-        self.wait_budget_s = float(wait_budget_s)
+        self.wait_budget_s = None if motion_policy.LIMITS_MANAGED_EXTERNALLY else float(wait_budget_s)
         self._anchors = {side: None for side in SIDES}
         self._resets = set(SIDES)
         self._sequence = 0
@@ -151,7 +153,8 @@ class ProcessKinematics:
         options = dict(modelroot=modelroot, mode=mode, velocity_limit=velocity_limit,
             posture_weight=posture_weight, solve_budget_s=solve_budget_s,
             position_weight=position_weight, orientation_weight=orientation_weight,
-            torso_waist_locked=torso_waist_locked, joint_limits=joint_limits)
+            torso_waist_locked=torso_waist_locked, joint_limits=joint_limits,
+            _external_limits=motion_policy.LIMITS_MANAGED_EXTERNALLY)
         context = mp.get_context('spawn')
         self._connection, child_connection = context.Pipe(duplex=True)
         self._process = context.Process(target=_worker_target or _worker_main,
@@ -246,7 +249,7 @@ class ProcessKinematics:
             raise ValueError('side must be left or right')
         value = finite_vector(q7, 7)
         limits = self.model.arms[side].limits
-        if np.any(value < limits[:, 0]) or np.any(value > limits[:, 1]):
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (np.any(value < limits[:, 0]) or np.any(value > limits[:, 1])):
             raise KinematicsError('posture_reference_outside_soft_limits')
         self._anchors[side] = value.copy()
 
@@ -260,7 +263,7 @@ class ProcessKinematics:
 
     def solve(self, measured14, targets, active, dt):
         started = time.perf_counter()
-        deadline = started+self.wait_budget_s
+        deadline = float('inf') if self.wait_budget_s is None else started+self.wait_budget_s
         if self._fault:
             raise KinematicsError('ik_worker_unavailable: '+self._fault)
         if not self._request_lock.acquire(blocking=False):
@@ -273,13 +276,13 @@ class ProcessKinematics:
                 q = finite_vector(measured14, 14).copy()
             except (TypeError, ValueError) as exc:
                 raise KinematicsError('invalid_seed') from exc
-            if not np.isfinite(dt) or not 0 < dt <= .05:
+            if not np.isfinite(dt) or dt<=0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and dt>.05):
                 raise KinematicsError('invalid_tick_interval')
             if set(active) != set(SIDES) or any(not isinstance(active[s], (bool, np.bool_)) for s in SIDES):
                 raise KinematicsError('invalid_active_arms')
             if set(targets)-set(SIDES):
                 raise KinematicsError('unknown_target_arm')
-            if np.any(q < self.model.limits[:, 0]) or np.any(q > self.model.limits[:, 1]):
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (np.any(q < self.model.limits[:, 0]) or np.any(q > self.model.limits[:, 1])):
                 raise KinematicsError('seed_outside_soft_limits')
             goals = {side: checked_pose(targets[side]) for side in SIDES if active[side] and side in targets}
             if any(active[side] and side not in goals for side in SIDES):
@@ -299,7 +302,7 @@ class ProcessKinematics:
                 raise KinematicsError('ik_worker_deadline_exceeded')
             self._requests.put_nowait(exchange)
             wait_started = time.perf_counter()
-            received = exchange.done.wait(max(0., deadline-time.perf_counter()))
+            received = exchange.done.wait(None if self.wait_budget_s is None else max(0., deadline-time.perf_counter()))
             timing['wait_s'] = time.perf_counter()-wait_started
             if not received or time.perf_counter() >= deadline:
                 raise KinematicsError('ik_worker_deadline_exceeded')
@@ -328,7 +331,7 @@ class ProcessKinematics:
             reason = getattr(exc, 'reason', 'ik_worker_invalid_result: '+str(exc))
             # Invalid caller input is rejected locally. Once dispatched, any
             # failure quarantines the process and its changed solver state.
-            if request_id is not None:
+            if request_id is not None and not motion_policy.LIMITS_MANAGED_EXTERNALLY:
                 self._invalidate(reason)
                 if exchange is not None and exchange.progress:
                     progress = dict(exchange.progress)

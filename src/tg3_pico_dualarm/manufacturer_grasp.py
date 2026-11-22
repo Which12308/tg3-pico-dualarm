@@ -4,6 +4,7 @@ Six motor measurements/commands are authoritative. A displayed scalar closure
 is only a projection of the commanded motor vector onto the calibration line.
 No motor feedback limit is interpreted as contact, force or grasp success.
 """
+from . import safety as motion_policy
 import time
 
 from .input_validation import validate_frame
@@ -70,15 +71,15 @@ class ManufacturerGrasp:
         except (ValueError,TypeError):
             self._cancel('invalid_or_stale_hand_input_hold')
             return self._status()
-        if not frame.focused:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not frame.focused:
             self._cancel('unfocused_hand_input_hold');return self._status()
         if frame.session!=self.session:
             self._cancel('new_session_requires_neutral')
             self.session=frame.session;self.sequence=-1;self.source_time=None
             self.source_ids=dict.fromkeys(self.ready)
-        if frame.sequence==self.sequence:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and frame.sequence==self.sequence:
             return self._status()  # No repeated motor output for the same packet.
-        if frame.sequence<self.sequence or (self.source_time is not None and frame.source_time_s<=self.source_time):
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (frame.sequence<self.sequence or (self.source_time is not None and frame.source_time_s<=self.source_time)):
             self._cancel('nonadvancing_hand_input_hold');return self._status()
         self.sequence,self.source_time=frame.sequence,frame.source_time_s
         sent=[]
@@ -87,7 +88,8 @@ class ManufacturerGrasp:
             if self.source_ids[side]!=item.source_id:
                 self.ready[side]=False;self.opening[side]=False;self.open_pressed[side]=False
                 self.source_ids[side]=item.source_id
-            if not item.connected or not item.tracked or item.pose is None or item.release_required:
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY:self.ready[side]=True
+            if not item.connected or not item.tracked or item.pose is None or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and item.release_required):
                 self.ready[side]=False;self.opening[side]=False;self.open_pressed[side]=False
                 self.reasons[side]='tracking_lost_fresh_neutral_required';continue
             if item.neutral:self.ready[side]=True

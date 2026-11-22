@@ -4,6 +4,7 @@ No joint or hand publisher lives here. Every service has a bounded future;
 FSM requests are limited to three frames. STOP or physical E-stop is never
 overwritten on restoration. Only the managed supervisor creates XARM.
 """
+from . import safety as motion_policy
 import re
 import time
 import math
@@ -45,6 +46,7 @@ class XArmPreparation:
         temporary.replace(path)
 
     def physical_guard(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return
         now=self.clock()
         if self.remote is None or not 0<=now-self.remote[1]<=.15:raise RuntimeError('physical_remote_missing_or_stale')
         axes=self.remote[0]

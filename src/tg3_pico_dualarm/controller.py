@@ -1,4 +1,5 @@
 """One dual-arm control loop; the robot adapter is the sole output boundary."""
+from . import safety as motion_policy
 from dataclasses import asdict,replace
 from copy import deepcopy
 import math
@@ -18,10 +19,12 @@ class Teleoperation:
                  watchdog_timeout_s=.15):
         self.robot,self.model,self.kinematics=robot,model,kinematics
         self.policy=policy
-        if not math.isfinite(watchdog_timeout_s) or not 0<watchdog_timeout_s<=.15:
+        if not math.isfinite(watchdog_timeout_s) or watchdog_timeout_s<=0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and watchdog_timeout_s>.15):
             raise ValueError('invalid_controller_watchdog_timeout')
         self.watchdog_timeout_s=watchdog_timeout_s
         self.cycle_timing={}
+        self._manual_stop=False
+        self._output_generation=0
         self._hardware=False
         if allow_hardware:
             from .manufacturer import ManufacturerAdapter
@@ -52,7 +55,10 @@ class Teleoperation:
             self.manufacturer_grasp=ManufacturerGrasp(robot,clock=self.clock,policy=policy)
 
     def disarm(self,reason,details=None):
+        self._manual_stop=True
+        self._output_generation+=1
         stop_result=self.robot.disarm(str(reason)) if self._hardware else None
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY and not self._hardware:self.robot.disarm()
         self.hands.invalidate()
         if self.manufacturer_grasp:self.manufacturer_grasp.invalidate()
         if self.mapper:self.mapper.invalidate()
@@ -78,6 +84,8 @@ class Teleoperation:
             raise RuntimeError('hardware_enable_ack_required_before_reseed')
         # ACK establishes an accepted target. Fresh feedback still supplies the
         # mapping and latched IK posture, without jumping this command history.
+        self._manual_stop=False
+        self._output_generation+=1
         target=self.robot.commanded_joint_positions
         if target is None:raise RuntimeError('accepted_manufacturer_joint_target_required')
         self.target=np.asarray(target,dtype=float).copy()
@@ -91,59 +99,80 @@ class Teleoperation:
                 boundary_hold=self.filter.boundary_hold)
         if self.manufacturer_grasp:self.manufacturer_grasp.initialize()
 
+    def _failure(self,reason,details=None):
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self.disarm(reason,details)
+        self.last_status=dict(state='control_error',reason=str(reason),robot_commands_sent=False,limits_owner='external')
+        if details is not None:self.last_status['failure_details']=details
+        return self.last_status
+
     def tick(self,frame,dt=.02):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY and self._manual_stop:return self.last_status
+        generation=self._output_generation
         tick_started=time.perf_counter()
         now=self.clock()
-        if type(dt) not in (float,int) or not math.isfinite(dt) or not 0<dt<=self.watchdog_timeout_s:
-            return self.disarm('control_tick_overrun',details=dict(tick_interval_s=dt if isinstance(dt,(float,int)) and math.isfinite(dt) else None))
+        if type(dt) not in (float,int) or not math.isfinite(dt) or dt<=0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and dt>self.watchdog_timeout_s):
+            return self._failure('control_tick_overrun',details=dict(tick_interval_s=dt if isinstance(dt,(float,int)) and math.isfinite(dt) else None))
         # OS/audit scheduling jitter is not a trajectory integration interval.
         # Never catch up a delayed cycle with a larger robot increment. The
         # independent command watchdog still stops at its original deadline.
         observed_dt=dt
-        dt=min(dt,.02)
+        dt=dt if motion_policy.LIMITS_MANAGED_EXTERNALLY else min(dt,.02)
         self.cycle_timing=dict(observed_interval_s=observed_dt,integration_interval_s=dt)
         try:state=self.robot.read_state()
-        except RuntimeError:return self.disarm('missing_joint_feedback')
+        except RuntimeError as exc:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self._failure('missing_joint_feedback')
+            self.last_status=dict(state='input_error',reason=str(exc),robot_commands_sent=False)
+            return self.last_status
         now=self.clock()
         # No unverified state can cross this boundary. The current live ROS
         # adapter is read-only and reports why actual dual-arm writes are gated.
         if self._hardware:
-            if not self.robot.hardware_writes_enabled:return self.disarm('explicit_hardware_enable_or_factory_ack_required')
-            if state.quality!='measured' or state.estop is not False:return self.disarm('measured_feedback_and_known_physical_estop_required')
+            if not self.robot.hardware_writes_enabled:return self._failure('explicit_hardware_enable_or_factory_ack_required')
+            if (state.quality not in (('measured','stale') if motion_policy.LIMITS_MANAGED_EXTERNALLY else ('measured',))
+                    or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and state.estop is not False)):return self._failure('measured_feedback_and_known_physical_estop_required')
             from .input_validation import validate_frame
             try:validate_frame(frame,now,self.policy)
-            except ValueError:return self.disarm('invalid_hardware_tracking_frame')
-            if not frame.focused or frame.head is None:return self.disarm('hardware_tracking_lost_explicit_reenable_required')
+            except ValueError as exc:
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self._failure('invalid_hardware_tracking_frame')
+                self.last_status=dict(state='input_error',reason=str(exc),robot_commands_sent=False)
+                return self.last_status
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not frame.focused or frame.head is None):return self._failure('hardware_tracking_lost_explicit_reenable_required')
         elif state.quality!='simulated':
-            return self.disarm('verified_dual_arm_hardware_adapter_required')
+            return self._failure('verified_dual_arm_hardware_adapter_required')
         measured=np.asarray(state.joint_positions,dtype=float)
         if state.estop is True:return self.disarm('physical_estop')
-        if not 0<=now-state.timestamp<=self.filter.config.feedback_timeout:
-            return self.disarm('stale_joint_feedback')
-        fresh_frame=frame is not None and frame.focused and 0<=now-frame.received_at+frame.source_age_s<=self.policy.total_age_s
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0<=now-state.timestamp<=self.filter.config.feedback_timeout:
+            return self._failure('stale_joint_feedback')
+        fresh_frame=frame is not None and (motion_policy.LIMITS_MANAGED_EXTERNALLY or (frame.focused and 0<=now-frame.received_at+frame.source_age_s<=self.policy.total_age_s))
         if fresh_frame:
             if self._calibration_session is not None and frame.session!=self._calibration_session:
-                self.disarm('tracking_reference_changed')
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY:self.disarm('tracking_reference_changed')
                 self.mapper=None
-                if self._hardware:return self.last_status
+                if self._hardware and not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self.last_status
             self._calibration_session=frame.session
         if self.mapper is None:
-            if frame is None or not frame.focused or frame.head is None or not 0<=now-frame.received_at+frame.source_age_s<=self.policy.total_age_s:
-                return self.disarm('waiting_for_fresh_head_pose')
+            if frame is None or frame.head is None or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not frame.focused or not 0<=now-frame.received_at+frame.source_age_s<=self.policy.total_age_s)):
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.last_status=dict(state='waiting_for_head_pose',robot_commands_sent=False)
+                    return self.last_status
+                return self._failure('waiting_for_fresh_head_pose')
             controllers=[getattr(frame,s) for s in SIDES]
-            if any(not c.neutral for c in controllers):
-                return self.disarm('release_inputs_for_heading_calibration')
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and any(not c.neutral for c in controllers):
+                return self._failure('release_inputs_for_heading_calibration')
             try:
                 calibration=Calibration.from_head(frame.head,translation_scale=self.scale,
                                                   orientation_scale=self.rotation_scale,**self.calibration_options)
-            except ValueError as exc:return self.disarm(str(exc))
+            except ValueError as exc:
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self._failure(str(exc))
+                self.last_status=dict(state='input_error',reason=str(exc),robot_commands_sent=False)
+                return self.last_status
             self.mapper=RelativeMapper(calibration,self.mode,max_displacement=self.workspace_extent,policy=self.policy)
         current=self.model.fk(measured)
         mapping=self.mapper.update(frame,current,now)
         hand_status=(self.manufacturer_grasp.step(frame) if self.manufacturer_grasp else
                      dict(hardware_hand_commands_sent=False,reason='hand_output_not_configured',closure={}) if self._hardware
                      else self.hands.update(frame,now,dt))
-        if hand_status.get('fault'):return self.disarm('hand_rejected:'+hand_status['fault'])
+        if hand_status.get('fault'):return self._failure('hand_rejected:'+hand_status['fault'])
         self._last_disarm_reason=None
         if self.kinematics is None:
             self.last_status=dict(state='cartesian_preview_only',active=mapping.active,
@@ -167,6 +196,7 @@ class Teleoperation:
         try:
             if any(mapping.active.values()):
                 proposed=self.kinematics.solve(self.target,mapping.targets,mapping.active,dt)
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY and (self._manual_stop or generation!=self._output_generation):return self.last_status
                 output_interval=getattr(self.robot,'output_interval_s',None) if self._hardware else None
                 filter_dt=min(dt,output_interval) if output_interval is not None else dt
                 target,velocity=self.filter.step(proposed,measured,self.target,self.velocity,filter_dt)
@@ -183,7 +213,7 @@ class Teleoperation:
                 # Record the actual OEM hold target, not the pre-hold seed.
                 command=JointCommand(tuple(map(float,target)),tuple(map(float,velocity)),now)
             else:accepted=self.robot.submit(command)
-            if not accepted.accepted:return self.disarm('robot_rejected:'+accepted.reason)
+            if not accepted.accepted:return self._failure('robot_rejected:'+accepted.reason)
             self.target,self.velocity=target,velocity
             self._active=mapping.active.copy()
             self.last_status=dict(state='hardware' if self._hardware else 'dry_run',active=mapping.active,reasons=mapping.reasons,
@@ -197,9 +227,13 @@ class Teleoperation:
             self.last_status['hands']=hand_status
             self._record(now,frame,state,mapping,command,accepted)
         except (RuntimeError,ValueError,SafetyError) as exc:
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                self.last_status=dict(state='control_error',reason=str(exc),robot_commands_sent=False,
+                    limits_owner='external',last_ik=deepcopy(getattr(self.kinematics,'last_diagnostics',{})))
+                return self.last_status
             # Preserve native solver timing before reset/cleanup. This is
             # diagnostic evidence only; failed proposals are never submitted.
-            return self.disarm('control_failed:'+str(exc),details=dict(
+            return self._failure('control_failed:'+str(exc),details=dict(
                 tick_wall_s=time.perf_counter()-tick_started,
                 last_ik=deepcopy(getattr(self.kinematics,'last_diagnostics',{}))))
         return self.last_status

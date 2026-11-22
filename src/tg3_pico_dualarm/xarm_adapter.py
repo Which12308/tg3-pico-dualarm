@@ -4,6 +4,7 @@ No vendor SDK or invented ownership lease is used. All ROS service operations
 are bounded call_async operations driven by poll_enable/check_watchdog. A ROS
 executor must spin independently; this module never spins within a callback.
 """
+from . import safety as motion_policy
 from dataclasses import dataclass
 import math
 from numbers import Real
@@ -310,16 +311,17 @@ class XArmAdapter:
 
     def _feedback_ok(self):
         state=self.read_state();now=self.clock()
-        if state.quality!='measured' or not 0<=now-state.stamp<=self.settings.feedback_timeout:
+        if (state.quality not in (('measured','stale') if motion_policy.LIMITS_MANAGED_EXTERNALLY else ('measured',))
+                or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0<=now-state.stamp<=self.settings.feedback_timeout)):
             raise RuntimeError('xarm_joint_feedback_missing_or_stale')
-        if state.estop is not False:raise RuntimeError('xarm_physical_estop_active_or_unknown')
+        if (state.estop is True if motion_policy.LIMITS_MANAGED_EXTERNALLY else state.estop is not False):raise RuntimeError('xarm_physical_estop_active_or_unknown')
         preparation=getattr(self,'preparation',None)
-        if preparation is not None and self.state in ('acquiring','armed'):preparation.physical_guard()
-        if self.state in ('acquiring','armed'):
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and preparation is not None and self.state in ('acquiring','armed'):preparation.physical_guard()
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and self.state in ('acquiring','armed'):
             snapshot=self.feedback.snapshot(require_hands=False)
             if state.mode!='HBWALK' or not snapshot['ready']:
                 raise RuntimeError('xarm_settled_running_HBWALK_required')
-        if getattr(self.transport,'warning_error',None):raise RuntimeError('xarm_manipulator_error_latched')
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and getattr(self.transport,'warning_error',None):raise RuntimeError('xarm_manipulator_error_latched')
         return state
 
     def _validate_list(self,response,expected):
@@ -380,10 +382,10 @@ class XArmAdapter:
                 # bypasses its upper-controller velocity cap. The direct wire
                 # transport must stay gated until the measured raw-output
                 # limiter and settled-acquisition path are installed.
-                if isinstance(self.transport,XArmRosTransport) and not self.transport.bounded_output_enforced:
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and isinstance(self.transport,XArmRosTransport) and not self.transport.bounded_output_enforced:
                     raise RuntimeError('xarm_verified_initial_output_limiter_required')
                 state=self._feedback_ok()
-                if state.mode!='HBWALK' or not self.feedback.snapshot(require_hands=False)['ready']:
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (state.mode!='HBWALK' or not self.feedback.snapshot(require_hands=False)['ready']):
                     raise RuntimeError('xarm_settled_running_HBWALK_required')
                 self.transport.discover();self.transport.check_publishers()
                 self.stop_confirmed=False;self._started=self.clock();self.state='acquiring'
@@ -406,7 +408,7 @@ class XArmAdapter:
     def _pump(self):
         now=self.clock()
         if self.state in ('acquiring','armed','holding'):self._feedback_ok()
-        if self.state=='armed' and self.hands.check_watchdog():raise RuntimeError('xarm_configured_hand_watchdog_failed')
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and self.state=='armed' and self.hands.check_watchdog():raise RuntimeError('xarm_configured_hand_watchdog_failed')
         if self.state in ('acquiring','releasing','holding') and self._stage is not None and now-self._started>self.settings.transition_timeout:
             raise RuntimeError('xarm_transition_timeout:'+str(self._stage))
         if self.state=='armed' and self.transport.pending is None and now>=self._next_audit:
@@ -453,6 +455,11 @@ class XArmAdapter:
             self._start('activate_ack','switch',activate=(CONTROLLER,))
         elif stage=='read_limits':
             values=self._parameters(response);self._parameter_values=values
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                self._velocity=tuple(values['vel_limits'])
+                self._parameter_stamp=now;self.verified_velocity=None
+                self._start('pre_enable_inactive_check','list')
+                return
             self._velocity=tuple(min(actual,cap) for actual,cap in zip(values['vel_limits'],self.settings.velocity_cap))
             self._start('set_limits','set',velocity=self._velocity)
         elif stage=='set_limits':
@@ -475,7 +482,7 @@ class XArmAdapter:
             self._validate_list(response,'armed');self.transport.check_publishers()
             state=self._feedback_ok();self.transport.open_publisher()
             self._target=state.positions;self._last_output=now
-            if getattr(self.transport,'initial_alignment_required',False):
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and getattr(self.transport,'initial_alignment_required',False):
                 self.transport.begin_initial_alignment(self._target)
                 self._stage='initial_alignment';self.reason='xarm_waiting_initial_raw_alignment_no_actuator_output'
                 return
@@ -518,6 +525,7 @@ class XArmAdapter:
         self._start('disable_ack','enable',value=False)
 
     def _fresh_status(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return
         preparation=getattr(self,'preparation',None)
         guard=getattr(preparation,'command_guard',None)
         if guard:guard.check()
@@ -533,6 +541,10 @@ class XArmAdapter:
                 self._pump()
                 if not self.hardware_writes_enabled:return SubmitResult(False,'xarm_output_not_armed:'+self.state)
                 self._fresh_status();state=self._feedback_ok();now=self.clock()
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.transport.publish(command.positions)
+                    self._target=command.positions;self._last_stamp=command.stamp;self._last_output=now
+                    return SubmitResult(True,'xarm_target_published_limits_external')
                 if not 0<=now-command.stamp<=self.settings.command_timeout:raise RuntimeError('xarm_command_stale_or_future')
                 if self._last_stamp is not None and command.stamp<=self._last_stamp:raise RuntimeError('xarm_command_replayed')
                 dt=now-self._last_output
@@ -584,6 +596,9 @@ class XArmAdapter:
             except Exception as exc:return self._fault(str(exc))
 
     def _fault(self,reason):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY and 'physical_estop' not in str(reason):
+            self.reason=str(reason)
+            return SubmitResult(False,self.reason)
         hand_result=self.hands.invalidate('xarm_fault:'+str(reason))
         if not hand_result.accepted:reason+=';hand_publisher_cleanup_unconfirmed:'+hand_result.reason
         self.transport.close_publisher();self.transport.cancel()
@@ -605,7 +620,7 @@ class XArmAdapter:
     def check_watchdog(self):
         with self.lock:
             try:
-                if self.state=='armed' and (self._last_output is None or self.clock()-self._last_output>self.settings.watchdog_timeout):
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and self.state=='armed' and (self._last_output is None or self.clock()-self._last_output>self.settings.watchdog_timeout):
                     self._stop('command_watchdog');return True
                 self._pump()
                 if self.state=='armed':self._fresh_status()

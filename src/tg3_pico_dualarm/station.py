@@ -1,4 +1,5 @@
 """Native wireless control station: dry-run by default, explicit verified hardware."""
+from . import safety as motion_policy
 import argparse
 from contextlib import ExitStack
 import json
@@ -144,7 +145,12 @@ def run(args, stop=None):
         requests=MotionRequests(lambda:robot.hardware_writes_enabled)
         request_result={}
         if admission:
-            gateway.control_callback=requests.enqueue
+            def request_control(value):
+                # Manual stop must close output even while native IK is waiting.
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY and value['operation']=='disable':
+                    controller.disarm('explicit_operator_disabled')
+                return requests.enqueue(value)
+            gateway.control_callback=request_control
         server=WirelessServer(gateway,host='127.0.0.1',port=args.port).start()
         cleanup.callback(server.close)
         headset_code=None
@@ -189,7 +195,7 @@ def run(args, stop=None):
                         # explicit enable. Protect the complete acquisition
                         # before requesting any factory mutation.
                         if action['operation']=='enable':watchdog.activate()
-                        if action['operation']=='enable' and not 0<=time.monotonic()-action['requested_at']<=.12:
+                        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and action['operation']=='enable' and not 0<=time.monotonic()-action['requested_at']<=.12:
                             request_result=dict(accepted=False,reason='motion_request_expired')
                         else:
                             request_result=admission.request(action['operation'],frame,expected_session=action['session'])
@@ -215,7 +221,7 @@ def run(args, stop=None):
                         status['last_control_failure']=controller.last_status.copy()
                 else:
                     status=controller.tick(frame,elapsed)
-                if engine.faulted:
+                if engine.faulted and not motion_policy.LIMITS_MANAGED_EXTERNALLY:
                     raise RuntimeError('native_ik_worker_fault:'+str(engine.fault_reason))
                 actual_feedback={}
                 manufacturer_snapshot={}

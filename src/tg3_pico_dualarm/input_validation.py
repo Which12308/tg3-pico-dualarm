@@ -6,6 +6,7 @@ clock; only receipt age and declared source age are combined with host time.
 """
 from __future__ import annotations
 
+from . import safety as motion_policy
 import math
 from .input_policy import NORMAL
 from numbers import Real
@@ -50,7 +51,7 @@ def _vector(value, length: int, name: str, *, bound: float | None = None) -> tup
 
 
 def validate_pose(pose, *, name: str = "pose") -> None:
-    _vector(_attribute(pose, "position"), 3, name + ".position", bound=20.)
+    _vector(_attribute(pose, "position"), 3, name + ".position", bound=None if motion_policy.LIMITS_MANAGED_EXTERNALLY else 20.)
     quaternion = _vector(_attribute(pose, "orientation_xyzw"), 4, name + ".orientation_xyzw")
     norm = math.sqrt(sum(item*item for item in quaternion))
     if not .98 <= norm <= 1.02:
@@ -105,9 +106,9 @@ def validate_frame(frame, now: float, policy=NORMAL) -> None:
     source_age = _number(_attribute(frame, "source_age_s"), "source_age_s")
     if source_time < 0 or received < 0:
         raise ValueError("tracking timestamps must be nonnegative")
-    if not 0 <= source_age <= policy.source_age_s:
+    if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0 <= source_age <= policy.source_age_s:
         raise ValueError("source_age_s is outside the validity budget")
-    if not 0 <= now-received or now-received+source_age > policy.total_age_s:
+    if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not 0 <= now-received or now-received+source_age > policy.total_age_s):
         raise ValueError("tracking frame is stale or from the host clock's future")
     for field in ("focused", "scene_visible"):
         if type(_attribute(frame, field)) is not bool:

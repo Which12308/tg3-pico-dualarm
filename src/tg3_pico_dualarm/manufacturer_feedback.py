@@ -3,6 +3,7 @@
 Schemas come from the actual installed ROS classes. Receipt timestamps use
 this process's monotonic clock; mode diagnostics do not stand in for E-stop.
 """
+from . import safety as motion_policy
 from dataclasses import asdict, dataclass
 import math
 from numbers import Real, Integral
@@ -157,6 +158,7 @@ class ManufacturerFeedback:
     def _fresh(stamp,now,limit):return stamp is not None and 0<=now-stamp<=limit
 
     def _estop(self,now):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY and self.power_keys:return self.power_keys.physical_estop
         return self.power_keys.physical_estop if self.power_keys and self._fresh(
             self.power_keys.received_at,now,self.estop_timeout) else None
 

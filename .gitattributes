@@ -1,0 +1,4 @@
+# Preserve the exact model bytes used by the runtime SHA-256 check on Windows.
+src/tg3_pico_dualarm/assets/*.urdf text eol=lf
+# Shell scripts are uploaded from Windows and executed by Bash on the robot.
+*.sh text eol=lf

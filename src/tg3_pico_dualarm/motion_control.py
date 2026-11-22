@@ -1,4 +1,5 @@
 """Explicit hardware admission, separate from tracking/clutch and configuration."""
+from . import safety as motion_policy
 import time
 import math
 from .input_validation import validate_frame
@@ -63,9 +64,9 @@ class MotionAdmission:
             self.input_timing=dict(now_s=now,received_at=received,received_age_s=now-received,
                 source_age_s=age,total_age_s=now-received+age)
         validate_frame(frame,now,self.policy)
-        if not frame.focused or frame.head is None:raise ValueError('fresh_focused_head_tracking_required')
-        if frame.scene_visible is not True:raise ValueError('passthrough_observation_required_for_motion')
-        if neutral and any(not c.connected or not c.tracked or c.release_required or not c.neutral
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not frame.focused or frame.head is None):raise ValueError('fresh_focused_head_tracking_required')
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and frame.scene_visible is not True:raise ValueError('passthrough_observation_required_for_motion')
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and neutral and any(not c.connected or not c.tracked or c.release_required or not c.neutral
                            for c in (frame.left,frame.right)):
             raise ValueError('both_controllers_tracked_and_released_required')
         self.validated_frame=frame
@@ -101,7 +102,7 @@ class MotionAdmission:
                 snapshot=self.robot.feedback.snapshot(require_hands=tuple(self.robot.profiles))
                 if not snapshot['ready']:raise ValueError('required_feedback_not_ready:'+','.join(snapshot['issues']))
             measured=self.robot.read_state().joint_positions
-            if any(not low<=value<=high for value,low,high in zip(measured,self.robot.limits.lower,self.robot.limits.upper)):
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and any(not low<=value<=high for value,low,high in zip(measured,self.robot.limits.lower,self.robot.limits.upper)):
                 raise ValueError('measured_arm_outside_verified_manufacturer_limits')
             self.session=frame.session
             if self.preparation:
@@ -126,7 +127,7 @@ class MotionAdmission:
             try:
                 self.check_phase='preparation_input'
                 frame=self._input(frame,neutral=True)
-                if frame.session!=self.session:raise ValueError('tracking_session_changed_during_preparation')
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and frame.session!=self.session:raise ValueError('tracking_session_changed_during_preparation')
                 if self.preparation.step():
                     self.preparing=False
                     result=self.robot.request_enable(True);self.reason=result.reason
@@ -148,7 +149,7 @@ class MotionAdmission:
         try:
             self.check_phase='acquiring_input' if self.robot.state=='acquiring' else 'running_input'
             frame=self._input(frame,neutral=self.robot.state=='acquiring' or self.initial_hold_pending)
-            if frame.session!=self.session:raise ValueError('tracking_session_changed_explicit_reenable_required')
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and frame.session!=self.session:raise ValueError('tracking_session_changed_explicit_reenable_required')
             if self.robot.state=='acquiring':
                 result=self.robot.poll_enable();self.reason=result.reason
                 if result.accepted:
@@ -163,6 +164,9 @@ class MotionAdmission:
         return self.status()
 
     def _begin_hold(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+            self.initial_hold_pending=False;self.just_enabled=True;self.reason='factory_handoff_limits_external'
+            return
         self.initial_hold_pending=True;self.hold_started=self.clock();self.stable_since=None
         self.hold_diagnostics=None
         self.hold_target=tuple(self.robot.commanded_joint_positions)

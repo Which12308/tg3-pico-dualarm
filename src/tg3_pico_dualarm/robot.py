@@ -6,6 +6,7 @@ not a dynamics simulator or evidence of a successful physical grasp.
 """
 from __future__ import annotations
 
+from . import safety as motion_policy
 from collections import deque
 from dataclasses import dataclass
 import math
@@ -135,9 +136,9 @@ class DryRunRobot:
         if self._disarmed:
             return SubmitResult(False, "software_disarmed")
         now = _timestamp(self._clock(), "clock")
-        if not 0 <= now - command.stamp <= self._max_age:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0 <= now - command.stamp <= self._max_age:
             return SubmitResult(False, "stale_or_future_command")
-        if self._last_stamp is not None and command.stamp <= self._last_stamp:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and self._last_stamp is not None and command.stamp <= self._last_stamp:
             return SubmitResult(False, "nonincreasing_command_stamp")
         self._commands.append(command)
         self._positions = command.positions

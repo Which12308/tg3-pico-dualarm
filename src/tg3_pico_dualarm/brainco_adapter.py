@@ -4,6 +4,7 @@ No arm controller, ownership request, SDK construction or automatic hand-open
 command lives here. SDK 26.06.x documents mode 1 and MotorStatus. Calibration
 and software raw-rate/feedback-lead limits must still be supplied per hand.
 """
+from . import safety as motion_policy
 import json
 import math
 from numbers import Real
@@ -40,7 +41,7 @@ def _fits(values,field):
 
 def encode_hand(message_type,fields,profile,positions):
     positions=tuple(positions)
-    if len(positions)!=6 or any(type(value) is not int or not low<=value<=high
+    if len(positions)!=6 or any(type(value) is not int or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not low<=value<=high)
             for value,low,high in zip(positions,profile.lower,profile.upper)):
         raise ValueError('hand_target_outside_measured_limits')
     # mode 1 controls positions; the historical current_limit profile name
@@ -58,6 +59,13 @@ def encode_hand(message_type,fields,profile,positions):
 def limit_hand_target(profile,closure,*,operation,previous,floating,measured,raw_rate,raw_lead,dt):
     """The shared six-channel factory limiter; floating residuals accumulate."""
     if operation not in (None,'close','open'):raise ValueError('unknown_hand_operation')
+    if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+        requested=tuple(profile.positions(closure))
+        values=tuple(old if operation=='close' and (goal-old)*(closed-opened)<0 else goal
+            for old,goal,opened,closed in zip(previous,requested,profile.opened,profile.closed))
+        return values,tuple(map(float,values)),dict(commanded_positions=values,measured_positions=tuple(measured),
+            feedback_limited=False,feedback_limited_channels=(False,)*6,limits_owner='external',operation=operation,
+            requested_positions=requested,effective_positions=values,command_target_reached=True)
     if not 0<dt<=.05:raise ValueError('nonadvancing_hand_clock')
     target=profile.positions(closure);values=[];next_float=[];limited=[];effective=[]
     for index,(old,goal) in enumerate(zip(floating,target)):
@@ -196,10 +204,10 @@ class BrainCoHandAdapter:
         self._parent_guard();snapshot=self.feedback.snapshot(require_hands=False)
         for side,profile in self.profiles.items():
             hand=snapshot['hands'][side]
-            if not hand['fresh']:raise RuntimeError(side+'_hand_feedback_missing_or_stale')
-            if not hand['states_safe_for_position_control']:raise RuntimeError(side+'_hand_motor_state_not_safe_for_position_control')
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not hand['fresh']:raise RuntimeError(side+'_hand_feedback_missing_or_stale')
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not hand['states_safe_for_position_control']:raise RuntimeError(side+'_hand_motor_state_not_safe_for_position_control')
             raw=hand['feedback']['positions']
-            if any(not low<=value<=high for value,low,high in zip(raw,profile.lower,profile.upper)):
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and any(not low<=value<=high for value,low,high in zip(raw,profile.lower,profile.upper)):
                 raise ValueError('actual_hand_outside_measured_profile:'+side)
         return snapshot
 
@@ -257,9 +265,9 @@ class BrainCoHandAdapter:
             try:
                 snapshot=self._measurements();now=self.clock()
                 if not self.initialized or side not in self.hand_publishers:raise RuntimeError('measured_hand_initialization_required')
-                if type(intent_stamp) not in (int,float) or not math.isfinite(intent_stamp) or not 0<=now-intent_stamp<=self.command_timeout:
+                if type(intent_stamp) not in (int,float) or not math.isfinite(intent_stamp) or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0<=now-intent_stamp<=self.command_timeout):
                     raise ValueError('stale_or_invalid_hand_intent')
-                if side in self._last_hand_intent and intent_stamp<=self._last_hand_intent[side]:return SubmitResult(False,'no_new_hand_intent')
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and side in self._last_hand_intent and intent_stamp<=self._last_hand_intent[side]:return SubmitResult(False,'no_new_hand_intent')
                 self._check_publishers(side)
                 values,floating,diagnostics=limit_hand_target(self.profiles[side],closure,operation=operation,
                     previous=self.hand_positions[side],floating=self._hand_float[side],measured=snapshot['hands'][side]['feedback']['positions'],
@@ -271,9 +279,13 @@ class BrainCoHandAdapter:
                 self._last_hand_intent[side]=intent_stamp;self.hand_diagnostics[side]=diagnostics
                 return SubmitResult(True,'published_calibrated_hand_from_measured_pose')
             except Exception as exc:
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.reason=str(exc)
+                    return SubmitResult(False,self.reason)
                 self.invalidate('BrainCo_hand_failed:'+str(exc));return SubmitResult(False,self.reason)
 
     def check_watchdog(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return False
         with self.lock:
             if not self.initialized:return False
             try:

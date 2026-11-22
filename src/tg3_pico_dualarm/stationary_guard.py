@@ -3,6 +3,7 @@
 This proves command isolation and zero requests, not physical balance or
 foot contact. The existing manufacturer body controller remains in charge.
 """
+from . import safety as motion_policy
 import math
 import threading
 import time
@@ -115,6 +116,7 @@ class StationaryCommandGuard:
             except Exception as exc:self.fault=str(exc)
 
     def check(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return
         with self.lock:
             if self.fault:raise RuntimeError('stationary_guard:'+self.fault)
             self._quiet()

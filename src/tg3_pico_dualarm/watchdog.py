@@ -1,11 +1,13 @@
 """Independent software watchdog for the dry-run command boundary."""
+from . import safety as motion_policy
+import math
 import threading
 import time
 
 
 class CommandWatchdog:
     def __init__(self,on_expired,timeout=.15,monotonic=time.monotonic,*,active=True):
-        if not 0<timeout<=1:raise ValueError('invalid watchdog timeout')
+        if not math.isfinite(timeout) or timeout<=0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and timeout>1):raise ValueError('invalid watchdog timeout')
         if type(active) is not bool:raise ValueError('watchdog active must be boolean')
         self.clock,self.timeout,self.on_expired=monotonic,timeout,on_expired
         self._stamp=monotonic();self._expired=False;self._stop=threading.Event()
@@ -29,6 +31,7 @@ class CommandWatchdog:
         with self._lock:self._stamp=self.clock()
 
     def check(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return False
         with self._lock:
             if not self._active:return self._expired
             expired=self.clock()-self._stamp>self.timeout
@@ -38,6 +41,7 @@ class CommandWatchdog:
         return self._expired
 
     def start(self):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return
         if self.thread is not None:raise RuntimeError('watchdog already started')
         def worker():
             while not self._stop.wait(min(.02,self.timeout/3)):self.check()

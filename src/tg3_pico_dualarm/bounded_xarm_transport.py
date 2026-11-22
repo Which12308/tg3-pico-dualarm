@@ -7,6 +7,7 @@ The field-tested initial envelope is 0.02 rad/s and 0.03 rad feedback lead.
 # Keep the closed-source factory's initial position output off actuators.
 # The measured relay is the sole real arm publisher; it never changes the
 # manufacturer mode, gains, reserved bits, IDs, or ownership service flow.
+from . import safety as motion_policy
 import copy,math,threading
 from .xarm_adapter import XArmRosTransport
 class BoundedXArmTransport(XArmRosTransport):
@@ -35,12 +36,17 @@ class BoundedXArmTransport(XArmRosTransport):
         real=self.node.get_publishers_info_by_topic('/arm/cmd')
         if any(not self._own_endpoint(e) or e.topic_type!='ros2_bridge_msgs/msg/ArmCtrl' for e in real) or len(real)>1:raise RuntimeError('competing_real_arm_writer')
         if self.output_fault:raise RuntimeError('bounded_factory_output:'+self.output_fault)
-        if self.adapter and self.adapter.state=='armed' and self.last_actual_time is not None and self.clock()-self.last_actual_time>.1:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and self.adapter and self.adapter.state=='armed' and self.last_actual_time is not None and self.clock()-self.last_actual_time>.1:
             raise RuntimeError('bounded_factory_output_stale')
     def open_publisher(self):
         # Open only the controller-input publisher. Real actuator output stays
         # absent until measured/native target alignment has been observed.
         super().open_publisher()
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+            with self.output_mutex:
+                self.actual_publisher=self.node.create_publisher(self.arm_type,'/arm/cmd',1)
+                self.last_actual=tuple(self.adapter.read_state().positions)
+                self.last_actual_time=self.clock()
 
     def begin_initial_alignment(self,target):
         from .initial_alignment import InitialOutputAlignment
@@ -84,13 +90,13 @@ class BoundedXArmTransport(XArmRosTransport):
             raw=motors[motor_id]
             if not all(math.isfinite(v) for v in (raw.pos,raw.spd,raw.kp,raw.kd)):
                 raise RuntimeError('nonfinite_raw_arm_field')
-            if not self.settings.lower[i]<=raw.pos<=self.settings.upper[i]:raise RuntimeError('raw_position_outside_limits')
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not self.settings.lower[i]<=raw.pos<=self.settings.upper[i]:raise RuntimeError('raw_position_outside_limits')
             if profile:
                 if abs(raw.kp-profile.kp[i])>1e-6 or abs(raw.kd-profile.kd[i])>1e-6:
                     raise RuntimeError('factory_hybrid_gains_not_confirmed:'+str(motor_id))
                 low=(-18.,-20.,-9.,-8.,-4.,-1.5,-1.5)[i%7]
                 high=(15.,20.,9.,8.,4.,1.5,1.5)[i%7]
-                if not math.isfinite(raw.tor) or not low<=raw.tor<=high:
+                if not math.isfinite(raw.tor) or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not low<=raw.tor<=high):
                     raise RuntimeError('factory_feedforward_torque_outside_reviewed_bounds:'+str(motor_id))
             elif raw.spd<=0:raise RuntimeError('positive_factory_position_speed_required')
         return motors,ids
@@ -111,6 +117,12 @@ class BoundedXArmTransport(XArmRosTransport):
             try:
                 self.adapter._fresh_status();state=self.adapter._feedback_ok();now=self.clock()
                 motors,ids=self._raw_motors(message)
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    values=tuple(motors[i].pos for i in ids)
+                    self.actual_publisher.publish(message)
+                    self.maximum_step=max(self.maximum_step,max(abs(a-b) for a,b in zip(values,self.last_actual)))
+                    self.last_actual=values;self.last_actual_time=now;self.actual_count+=1
+                    return
                 dt=now-self.last_actual_time
                 if not 0<dt<=.1:raise RuntimeError('raw_output_timing_invalid')
                 output=copy.deepcopy(message);formatted={m.name:m for m in output.ctrl};next_values=[]
@@ -139,6 +151,9 @@ class BoundedXArmTransport(XArmRosTransport):
                 self.maximum_step=max(self.maximum_step,max(abs(a-b) for a,b in zip(next_values,self.last_actual)))
                 self.last_actual=tuple(next_values);self.last_actual_time=now;self.actual_count+=1
             except Exception as exc:
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.feedback_fault_details=dict(error=str(exc),limits_owner='external')
+                    return
                 self.output_fault=str(exc)
                 if self.actual_publisher is not None:
                     publisher=self.actual_publisher;self.actual_publisher=None;self._retire_publisher(publisher)

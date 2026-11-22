@@ -5,6 +5,7 @@ quaternions. Robot coordinate conversion belongs in the controller adapter.
 """
 from __future__ import annotations
 
+from . import safety as motion_policy
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 import importlib
@@ -46,7 +47,7 @@ class Pose:
     def from_payload(cls, value) -> 'Pose':
         if not isinstance(value, dict) or set(value) != {'position', 'orientation_xyzw'}:
             raise ValueError('pose requires position and orientation_xyzw')
-        position = _vector(value['position'], 3, 'position', 20.)
+        position = _vector(value['position'], 3, 'position', None if motion_policy.LIMITS_MANAGED_EXTERNALLY else 20.)
         orientation = _vector(value['orientation_xyzw'], 4, 'orientation')
         norm = math.sqrt(sum(v*v for v in orientation))
         if abs(norm - 1.) > .02:
@@ -127,7 +128,7 @@ class TrackingFrame:
             raise ValueError('invalid sequence')
         source_time = _number(value['source_time_s'], 'source_time_s')
         age = _number(value['source_age_s'], 'source_age_s')
-        if source_time < 0 or not 0 <= age <= policy.source_age_s:
+        if source_time < 0 or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not 0 <= age <= policy.source_age_s):
             raise ValueError('invalid or expired source timestamp')
         focused, scene_visible = value['focused'], value.get('scene_visible', False)
         if type(focused) is not bool or type(scene_visible) is not bool:
@@ -137,7 +138,7 @@ class TrackingFrame:
             raise ValueError('unknown tracking source')
         head = Pose.from_payload(value['head']) if value['head'] is not None else None
         left, right = (ControllerState.from_payload(value[side]) for side in ('left', 'right'))
-        if not focused:
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and not focused:
             head = None
             left, right = (replace(c, pose=None, tracked=False) for c in (left, right))
         return cls(session, sequence, source_time, _number(received_at, 'received_at'),
@@ -176,6 +177,9 @@ class LatestTracking:
 
     def invalidate(self, reason: str = 'input_invalid') -> None:
         with self.lock:
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                self.last_error=reason
+                return
             if reason=='tracking_expired' and self.last_error!=reason:self.counters['expired']+=1
             self.release_required = {'left': True, 'right': True}
             if self.latest is not None:
@@ -190,12 +194,18 @@ class LatestTracking:
             try:
                 frame = TrackingFrame.from_payload(payload, now, self.policy)
                 transport_age = _number(additional_age_s, 'additional_age_s')
-                if transport_age < 0 or frame.source_age_s+transport_age > min(self.policy.source_age_s, self.max_age_s):
+                if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (transport_age < 0 or frame.source_age_s+transport_age > min(self.policy.source_age_s, self.max_age_s)):
                     raise ValueError('expired_source_and_transport_age')
                 # A server-issued nonce bounds the transport age using this
                 # receiving clock only. Preserve source_time_s as reported;
                 # never subtract a headset clock from a workstation clock.
                 frame = replace(frame, source_age_s=frame.source_age_s+transport_age)
+                if motion_policy.LIMITS_MANAGED_EXTERNALLY:
+                    self.latest=replace(frame,left=replace(frame.left,release_required=False),right=replace(frame.right,release_required=False))
+                    self.release_required=dict.fromkeys(('left','right'),False)
+                    self.counters['accepted']+=1
+                    self.last_error=''
+                    return self.latest
                 old = self.latest
                 if frame.session in self.retired:
                     raise ValueError('retired_session')
@@ -237,7 +247,7 @@ class LatestTracking:
             if self.latest is None:
                 return None
             age = now-self.latest.received_at+self.latest.source_age_s
-            if age < 0 or age > self.max_age_s:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (age < 0 or age > self.max_age_s):
                 self.invalidate('tracking_expired')
             return self.latest
 
@@ -245,7 +255,9 @@ class LatestTracking:
         with self.lock:
             now = self.clock() if now is None else now
             frame = self.sample(now)
-            return {'input_profile': self.policy.name, 'total_age_limit_s': self.max_age_s, 'source_age_limit_s': self.policy.source_age_s, 'source': 'tracking', 'robot_commands_sent': False,
+            return {'limits_owner': 'external' if motion_policy.LIMITS_MANAGED_EXTERNALLY else 'local',
+                    'input_profile': self.policy.name, 'total_age_limit_s': None if motion_policy.LIMITS_MANAGED_EXTERNALLY else self.max_age_s,
+                    'source_age_limit_s': None if motion_policy.LIMITS_MANAGED_EXTERNALLY else self.policy.source_age_s, 'source': 'tracking', 'robot_commands_sent': False,
                     'input_source': None if frame is None else frame.source,
                     'received': frame is not None,
                     'sample_age_s': None if frame is None else max(0., now-frame.received_at+frame.source_age_s),

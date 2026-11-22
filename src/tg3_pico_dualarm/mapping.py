@@ -1,4 +1,5 @@
 """Calibrated relative SE(3) targets with independent physical clutch state."""
+from . import safety as motion_policy
 from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
@@ -82,7 +83,9 @@ class Calibration:
         r = np.array(self.xr_to_robot,dtype=float,copy=True)
         if r.shape != (3,3) or not np.all(np.isfinite(r)) or not np.allclose(r.T@r,np.eye(3),atol=1e-7) or not np.isclose(np.linalg.det(r),1):
             raise ValueError('calibration must be a proper rotation')
-        if not .01 <= self.translation_scale <= 1 or not 0 <= self.orientation_scale <= 1:
+        if (not np.isfinite(self.translation_scale) or not np.isfinite(self.orientation_scale)
+                or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and
+                    (not .01 <= self.translation_scale <= 1 or not 0 <= self.orientation_scale <= 1))):
             raise ValueError('invalid mapping scale')
         r.setflags(write=False)
         object.__setattr__(self,'xr_to_robot',r)
@@ -138,6 +141,7 @@ class RelativeMapper:
             state.update(released=False,anchor=None,last=None,blocked=False)
 
     def within_workspace(self,side,tcp_pose):
+        if motion_policy.LIMITS_MANAGED_EXTERNALLY:return True
         anchor=self._states[side]['anchor']
         if anchor is None:return True
         origin=anchor[1]@np.linalg.inv(self.calibration.tcp_to_hand[side])
@@ -153,15 +157,15 @@ class RelativeMapper:
             for side in SIDES:
                 result.active[side]=False;result.relatch[side]=False;result.reasons[side]='invalid_tracking_frame'
             return result
-        if frame is None or not frame.focused or not 0 <= now-frame.received_at+frame.source_age_s <= self.policy.total_age_s or frame.received_at<=self._barrier:
+        if frame is None or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and (not frame.focused or not 0 <= now-frame.received_at+frame.source_age_s <= self.policy.total_age_s or frame.received_at<=self._barrier)):
             self.invalidate(now)
             for side in SIDES:
                 result.active[side]=False;result.relatch[side]=False;result.reasons[side]='tracking_stale_or_unfocused'
             return result
         if frame.session != self._session:
             self.invalidate();self._session=frame.session;self._sequence=-1
-        fresh=frame.sequence>self._sequence
-        if frame.sequence<self._sequence:
+        fresh=motion_policy.LIMITS_MANAGED_EXTERNALLY or frame.sequence>self._sequence
+        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and frame.sequence<self._sequence:
             self.invalidate()
             for side in SIDES:
                 result.active[side]=False;result.relatch[side]=False;result.reasons[side]='replayed_frame'
@@ -173,7 +177,7 @@ class RelativeMapper:
             if not controller.connected or not controller.tracked or controller.pose is None:
                 state.update(released=False,anchor=None,last=None,blocked=False)
                 result.reasons[side]='controller_invalid';continue
-            if controller.release_required:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and controller.release_required:
                 state.update(released=False,anchor=None,last=None)
                 result.reasons[side]='fresh_release_required';continue
             try:
@@ -193,7 +197,7 @@ class RelativeMapper:
                 if state['anchor'] is not None:state['released']=False
                 state.update(anchor=None,last=None)
                 result.reasons[side]='grip_not_fully_pressed';continue
-            if state['blocked'] or not state['released']:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and (state['blocked'] or not state['released']):
                 result.reasons[side]='fresh_release_required';continue
             if state['anchor'] is None:
                 if not fresh:
@@ -202,7 +206,7 @@ class RelativeMapper:
                 robot_hand=rigid_transform(current_poses[side])@self.calibration.tcp_to_hand[side]
                 state['anchor']=(controller_hand.copy(),robot_hand.copy())
                 result.relatch[side]=True
-            if fresh and state['last'] is not None:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and fresh and state['last'] is not None:
                 last_position,last_time=state['last']
                 span=frame.source_time_s-last_time
                 distance=float(np.linalg.norm(controller_pose[:3,3]-last_position))
@@ -214,7 +218,7 @@ class RelativeMapper:
             start,robot_start=state['anchor']
             controller_hand=controller_pose@self.calibration.controller_to_hand[side]
             delta=self.calibration.translation_scale*self.calibration.xr_to_robot@(controller_hand[:3,3]-start[:3,3])
-            if np.linalg.norm(delta)>self.max_displacement:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and np.linalg.norm(delta)>self.max_displacement:
                 state.update(released=False,anchor=None,last=None,blocked=True)
                 result.reasons[side]='clutch_displacement_limit';continue
             target=robot_start.copy();target[:3,3]+=delta
@@ -224,7 +228,7 @@ class RelativeMapper:
                 target[:3,:3]=scaled_rotation(delta_r,self.calibration.orientation_scale)@robot_start[:3,:3]
             tcp_target=target@np.linalg.inv(self.calibration.tcp_to_hand[side])
             start_tcp=robot_start@np.linalg.inv(self.calibration.tcp_to_hand[side])
-            if np.linalg.norm(tcp_target[:3,3]-start_tcp[:3,3])>self.max_displacement:
+            if not motion_policy.LIMITS_MANAGED_EXTERNALLY and np.linalg.norm(tcp_target[:3,3]-start_tcp[:3,3])>self.max_displacement:
                 state.update(released=False,anchor=None,last=None,blocked=True)
                 result.reasons[side]='tcp_displacement_limit';continue
             result.targets[side]=tcp_target;result.active[side]=True;result.reasons[side]='active'

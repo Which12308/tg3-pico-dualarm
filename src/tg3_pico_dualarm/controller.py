@@ -198,6 +198,7 @@ class Teleoperation:
                                   calibration=self.mapper.calibration.as_dict(),
                                   ik=getattr(self.kinematics,'last_diagnostics',{}))
             self.last_status['cycle_timing']=self.cycle_timing.copy()
+            self.last_status['mapping_limits']=dict(mapping.limits)
             self.last_status['safety']=self.filter.last_diagnostics.copy()
             self.last_status['model_links']={side:{name:point.tolist() for name,point in self.model.arms[side].links(target[i*7:(i+1)*7]).items()} for i,side in enumerate(SIDES)}
             self.last_status['hands']=hand_status

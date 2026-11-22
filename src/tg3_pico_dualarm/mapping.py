@@ -119,14 +119,38 @@ class MappingResult:
     active: dict = field(default_factory=dict)
     relatch: dict = field(default_factory=dict)
     reasons: dict = field(default_factory=dict)
+    limits: dict = field(default_factory=dict)
+
+
+def _clamp_position(pose,center,radius):
+    offset=pose[:3,3]-center;distance=float(np.linalg.norm(offset))
+    if distance<=radius:return False
+    pose[:3,3]=center+offset*(radius/distance);return True
+
+
+def _clamp_rotation(pose,reference,angle_limit):
+    relative=pose[:3,:3]@reference[:3,:3].T
+    angle=math.acos(float(np.clip((np.trace(relative)-1)/2,-1,1)))
+    if angle<=angle_limit:return False
+    pose[:3,:3]=scaled_rotation(relative,angle_limit/angle)@reference[:3,:3];return True
 
 
 class RelativeMapper:
-    def __init__(self,calibration,mode='pose',max_displacement=.20,max_controller_speed=1.,*,policy=None):
+    def __init__(self,calibration,mode='pose',max_displacement=.20,max_controller_speed=1.,*,policy=None,
+                 max_target_lead=.03,max_target_lead_rotation=.15):
         from .input_policy import NORMAL
         self.policy=NORMAL if policy is None else policy
         if mode not in ('pose','position'):
             raise ValueError('mode must be pose or position')
+        # The arm moves far slower than a hand (0.02 rad/s joint cap on XARM).
+        # Targets are kept within this distance/angle of the measured TCP so
+        # IK never chases a pose the arm cannot reach soon, and a hand that
+        # runs ahead does not end the clutch.
+        for value in (max_target_lead,max_target_lead_rotation):
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<=0:
+                raise ValueError('invalid_target_lead_limit')
+        if max_target_lead>max_displacement:raise ValueError('invalid_target_lead_limit')
+        self.max_target_lead,self.max_target_lead_rotation=float(max_target_lead),float(max_target_lead_rotation)
         self.calibration,self.mode = calibration,mode
         self.max_displacement,self.max_controller_speed=max_displacement,max_controller_speed
         self._session=None; self._sequence=-1;self._barrier=-float('inf')
@@ -214,9 +238,11 @@ class RelativeMapper:
             start,robot_start=state['anchor']
             controller_hand=controller_pose@self.calibration.controller_to_hand[side]
             delta=self.calibration.translation_scale*self.calibration.xr_to_robot@(controller_hand[:3,3]-start[:3,3])
+            limits=[]
             if np.linalg.norm(delta)>self.max_displacement:
-                state.update(released=False,anchor=None,last=None,blocked=True)
-                result.reasons[side]='clutch_displacement_limit';continue
+                # Hold the target on the workspace sphere instead of ending the
+                # clutch; it follows again as soon as the hand comes back.
+                delta=delta*(self.max_displacement/np.linalg.norm(delta));limits.append('workspace_clamped')
             target=robot_start.copy();target[:3,3]+=delta
             if self.mode=='pose':
                 r=self.calibration.xr_to_robot
@@ -224,8 +250,15 @@ class RelativeMapper:
                 target[:3,:3]=scaled_rotation(delta_r,self.calibration.orientation_scale)@robot_start[:3,:3]
             tcp_target=target@np.linalg.inv(self.calibration.tcp_to_hand[side])
             start_tcp=robot_start@np.linalg.inv(self.calibration.tcp_to_hand[side])
-            if np.linalg.norm(tcp_target[:3,3]-start_tcp[:3,3])>self.max_displacement:
-                state.update(released=False,anchor=None,last=None,blocked=True)
-                result.reasons[side]='tcp_displacement_limit';continue
+            if _clamp_position(tcp_target,start_tcp[:3,3],self.max_displacement) and 'workspace_clamped' not in limits:
+                limits.append('workspace_clamped')
+            current=rigid_transform(current_poses[side])
+            lead=_clamp_position(tcp_target,current[:3,3],self.max_target_lead)
+            lead=_clamp_rotation(tcp_target,current,self.max_target_lead_rotation) or lead
+            if lead:
+                limits.append('target_lead_limited')
+                # Measured TCP may sit just outside the sphere; stay inside it.
+                _clamp_position(tcp_target,start_tcp[:3,3],self.max_displacement)
             result.targets[side]=tcp_target;result.active[side]=True;result.reasons[side]='active'
+            result.limits[side]=tuple(limits)
         return result

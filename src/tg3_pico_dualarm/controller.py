@@ -10,6 +10,11 @@ from .robot import JointCommand
 from .safety import JointSafetyFilter,SafetyError
 from .hands import ContinuousHands
 from .input_policy import NORMAL
+from .input_validation import validate_frame
+
+
+RETURN_SPEED_RAD_S = .12
+RETURN_POSITION_TOLERANCE_RAD = .02
 
 
 class Teleoperation:
@@ -25,6 +30,10 @@ class Teleoperation:
         self.cycle_timing={}
         self._manual_stop=False
         self._output_generation=0
+        self.home_joints=None
+        self._home_move=None
+        self._home_needs_release=False
+        self.home_phase=None
         self._hardware=False
         if allow_hardware:
             from .manufacturer import ManufacturerAdapter
@@ -57,6 +66,10 @@ class Teleoperation:
     def disarm(self,reason,details=None):
         self._manual_stop=True
         self._output_generation+=1
+        self.home_joints=None
+        self._home_move=None
+        self._home_needs_release=False
+        self.home_phase=None
         stop_result=self.robot.disarm(str(reason)) if self._hardware else None
         if motion_policy.LIMITS_MANAGED_EXTERNALLY and not self._hardware:self.robot.disarm()
         self.hands.invalidate()
@@ -89,6 +102,11 @@ class Teleoperation:
         target=self.robot.commanded_joint_positions
         if target is None:raise RuntimeError('accepted_manufacturer_joint_target_required')
         self.target=np.asarray(target,dtype=float).copy()
+        state=self.robot.read_state()
+        self.home_joints=np.asarray(state.joint_positions,dtype=float) if state.quality=='measured' else None
+        self._home_move=None
+        self._home_needs_release=False
+        self.home_phase=None
         self.velocity[:]=0.;self._active=dict.fromkeys(SIDES,False)
         self.mapper=None;self._calibration_session=None
         self.kinematics.reset()
@@ -99,13 +117,89 @@ class Teleoperation:
                 boundary_hold=self.filter.boundary_hold)
         if self.manufacturer_grasp:self.manufacturer_grasp.initialize()
 
+    def _home_input_ready(self,frame,session,now):
+        try:validate_frame(frame,now,self.policy)
+        except ValueError:return False
+        return (frame.session==session and frame.focused and frame.head is not None
+                and 0<=now-frame.received_at+frame.source_age_s<=self.policy.total_age_s
+                and all(item.connected and item.tracked and item.neutral and not item.release_required
+                        for item in (frame.left,frame.right)))
+
+    def request_home(self,frame,session):
+        if self._manual_stop or self.home_joints is None or not self.robot.hardware_writes_enabled:
+            return dict(accepted=False,reason='home_requires_enabled_arm_and_measured_start')
+        if self._home_move is not None:
+            return dict(accepted=False,reason='already_returning_home')
+        if not self._home_input_ready(frame,session,self.clock()):
+            return dict(accepted=False,reason='home_requires_fresh_neutral_controllers')
+        try:feedback=self.robot.read_state()
+        except RuntimeError:return dict(accepted=False,reason='home_requires_measured_feedback')
+        if feedback.quality!='measured':
+            return dict(accepted=False,reason='home_requires_measured_feedback')
+        start=np.asarray(self.robot.commanded_joint_positions,dtype=float).copy()
+        peak_delta=float(np.max(np.abs(self.home_joints-start)))
+        self._home_move=dict(start=start,duration=max(.5,1.875*peak_delta/RETURN_SPEED_RAD_S),
+                             elapsed=0.,session=session)
+        self.home_phase='returning'
+        self._active=dict.fromkeys(SIDES,False)
+        if self.mapper:self.mapper.invalidate()
+        self.kinematics.reset()
+        return dict(accepted=True,reason='return_home_started')
+
+    def _tick_home(self,frame,state,now,dt,generation):
+        move=self._home_move
+        if move is None or state.quality!='measured' or not self._home_input_ready(frame,move['session'],now):
+            if move is not None:
+                self._home_move=None
+                self._home_needs_release=True
+            else:
+                self._home_needs_release=not (frame and self._home_input_ready(frame,frame.session,now))
+            if self._manual_stop or generation!=self._output_generation:return self.last_status
+            result=self.robot.hold()
+            if not result.accepted:return self._failure('return_home_hold_failed:'+result.reason)
+            self.velocity[:]=0.
+            self.home_phase='waiting_for_release' if self._home_needs_release else 'cancelled'
+            self.last_status=dict(state='hardware',robot_commands_sent=result.accepted,
+                active=self._active.copy(),home_available=self.home_joints is not None,
+                return_home=self.home_phase,joint_positions=self.target.tolist(),
+                reason='return_home_waiting_for_neutral')
+            return self.last_status
+        move['elapsed']+=min(dt,.02)
+        fraction=min(1.,move['elapsed']/move['duration'])
+        blend=fraction**3*(10+fraction*(-15+6*fraction))
+        proposed=move['start']+blend*(self.home_joints-move['start'])
+        try:
+            interval=getattr(self.robot,'output_interval_s',None)
+            output_dt=min(dt,interval) if interval is not None else dt
+            target,velocity=self.filter.step(proposed,state.joint_positions,self.target,self.velocity,output_dt)
+            if self._manual_stop or generation!=self._output_generation:return self.last_status
+            command=JointCommand(target,velocity,now)
+            result=self.robot.submit(command)
+            if not result.accepted:raise RuntimeError(result.reason)
+        except (RuntimeError,ValueError,SafetyError) as exc:
+            self._home_move=None
+            self._home_needs_release=True
+            self.home_phase='failed'
+            return self._failure('return_home_failed:'+str(exc))
+        self.target,self.velocity=target,velocity
+        arrived=(fraction==1. and np.max(np.abs(target-self.home_joints))<1e-5 and state.quality=='measured'
+                 and np.max(np.abs(np.asarray(state.joint_positions)-self.home_joints))<=RETURN_POSITION_TOLERANCE_RAD)
+        if arrived:
+            self._home_move=None
+            self.home_phase='arrived'
+        self.last_status=dict(state='hardware',robot_commands_sent=True,active=self._active.copy(),
+            joint_positions=target.tolist(),joint_velocities=velocity.tolist(),home_available=True,
+            return_home=self.home_phase,return_fraction=fraction,
+            cycle_timing=self.cycle_timing.copy())
+        return self.last_status
+
     def _failure(self,reason,details=None):
         if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self.disarm(reason,details)
         self.last_status=dict(state='control_error',reason=str(reason),robot_commands_sent=False,limits_owner='external')
         if details is not None:self.last_status['failure_details']=details
         return self.last_status
 
-    def tick(self,frame,dt=.02):
+    def tick(self,frame,dt=.02,*,record_task_space=False):
         if motion_policy.LIMITS_MANAGED_EXTERNALLY and self._manual_stop:return self.last_status
         generation=self._output_generation
         tick_started=time.perf_counter()
@@ -130,7 +224,9 @@ class Teleoperation:
             if not self.robot.hardware_writes_enabled:return self._failure('explicit_hardware_enable_or_factory_ack_required')
             if (state.quality not in (('measured','stale') if motion_policy.LIMITS_MANAGED_EXTERNALLY else ('measured',))
                     or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and state.estop is not False)):return self._failure('measured_feedback_and_known_physical_estop_required')
-            from .input_validation import validate_frame
+            if state.estop is True:return self.disarm('physical_estop')
+            if self._home_move is not None or self._home_needs_release:
+                return self._tick_home(frame,state,now,dt,generation)
             try:validate_frame(frame,now,self.policy)
             except ValueError as exc:
                 if not motion_policy.LIMITS_MANAGED_EXTERNALLY:return self._failure('invalid_hardware_tracking_frame')
@@ -181,6 +277,7 @@ class Teleoperation:
                                   calibration=self.mapper.calibration.as_dict())
             self.last_status['model_links']={side:{name:point.tolist() for name,point in self.model.arms[side].links(measured[i*7:(i+1)*7]).items()} for i,side in enumerate(SIDES)}
             self.last_status['hands']=hand_status
+            if record_task_space:self.last_status['task_space']=self._task_space(current,mapping)
             self._record(now,frame,state,mapping,None,None)
             return self.last_status
         for side,offset in (('left',0),('right',7)):
@@ -216,15 +313,18 @@ class Teleoperation:
             if not accepted.accepted:return self._failure('robot_rejected:'+accepted.reason)
             self.target,self.velocity=target,velocity
             self._active=mapping.active.copy()
+            if any(mapping.active.values()):self.home_phase=None
             self.last_status=dict(state='hardware' if self._hardware else 'dry_run',active=mapping.active,reasons=mapping.reasons,
                                   joint_positions=target.tolist(),joint_velocities=velocity.tolist(),
                                   robot_commands_sent=self._hardware,simulated_command_accepted=not self._hardware,
+                                  home_available=self.home_joints is not None,return_home=self.home_phase,
                                   calibration=self.mapper.calibration.as_dict(),
                                   ik=getattr(self.kinematics,'last_diagnostics',{}))
             self.last_status['cycle_timing']=self.cycle_timing.copy()
             self.last_status['safety']=self.filter.last_diagnostics.copy()
             self.last_status['model_links']={side:{name:point.tolist() for name,point in self.model.arms[side].links(target[i*7:(i+1)*7]).items()} for i,side in enumerate(SIDES)}
             self.last_status['hands']=hand_status
+            if record_task_space:self.last_status['task_space']=self._task_space(current,mapping)
             self._record(now,frame,state,mapping,command,accepted)
         except (RuntimeError,ValueError,SafetyError) as exc:
             if motion_policy.LIMITS_MANAGED_EXTERNALLY:
@@ -237,6 +337,14 @@ class Teleoperation:
                 tick_wall_s=time.perf_counter()-tick_started,
                 last_ik=deepcopy(getattr(self.kinematics,'last_diagnostics',{}))))
         return self.last_status
+
+    def _task_space(self, measured_poses, mapping):
+        offsets=self.mapper.calibration.tcp_to_hand
+        return dict(frame=self.model.base_frame,
+                    measured_tcp={side:pose.tolist() for side,pose in measured_poses.items()},
+                    target_tcp={side:pose.tolist() for side,pose in mapping.targets.items()},
+                    measured_grasp={side:(pose@offsets[side]).tolist() for side,pose in measured_poses.items()},
+                    target_grasp={side:(pose@offsets[side]).tolist() for side,pose in mapping.targets.items()})
 
     def _record(self,now,frame,state,mapping,command,result):
         if self.recorder and getattr(self.recorder,'samples_enabled',True):

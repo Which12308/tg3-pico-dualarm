@@ -197,7 +197,7 @@ class InputGateway:
             if issued is None or not 0<=self.clock()-issued<=.12:raise ValueError('expired_control_challenge')
             if self.role!='relay' or self.control_callback is None:raise ValueError('hardware_control_not_configured')
             if (not isinstance(value,dict) or set(value)!={'protocol','operation','session'}
-                    or value['protocol']!=PROTOCOL or value['operation'] not in ('enable','disable')
+                    or value['protocol']!=PROTOCOL or value['operation'] not in ('enable','disable','return_home')
                     or (value['session'] is not None and not isinstance(value['session'],str))):
                 raise ValueError('invalid_control_request')
             result=self.control_callback(dict(value,requested_at=self.clock()))

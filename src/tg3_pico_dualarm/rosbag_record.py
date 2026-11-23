@@ -33,6 +33,7 @@ KNOWN_TOPICS = {
     "/sbus_data": "sensor_msgs/msg/Joy",
     "/hric/robot/rl_state": "diagnostic_msgs/msg/DiagnosticStatus",
     "/right_hand/motor_status": "brainco_hand_msgs/msg/MotorStatus",
+    "/right_hand/touch_status": "brainco_hand_msgs/msg/TouchStatus",
     "/right_hand/set_motor_multi": "brainco_hand_msgs/msg/SetMotorMulti",
     "/left_hand/motor_status": "brainco_hand_msgs/msg/MotorStatus",
     "/left_hand/set_motor_multi": "brainco_hand_msgs/msg/SetMotorMulti",

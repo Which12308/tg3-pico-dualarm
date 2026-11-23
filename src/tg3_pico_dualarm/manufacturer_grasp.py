@@ -19,6 +19,7 @@ class ManufacturerGrasp:
         self.robot,self.clock=robot,clock
         self.policy=policy
         self.initialized=False;self.session=None;self.sequence=-1;self.source_time=None
+        self.tactile=getattr(getattr(robot,'hands',None),'tactile',{})
         self.ready={side:False for side in robot.profiles}
         self.opening={side:False for side in robot.profiles}
         self.source_ids={side:None for side in robot.profiles}
@@ -58,7 +59,9 @@ class ManufacturerGrasp:
                 if len(values)==6 and denominator>0 else None)
         return dict(closure=projection,closure_is_projection=True,ready=self.ready.copy(),
             reason=self.reasons.copy(),intent={side:'open' if self.opening[side] else None for side in self.ready},
-            commanded_motor_positions=commanded,measured_motor_positions=measured,
+            commanded_motor_positions={side:(None if diagnostics[side].get('grasp_phase')=='holding'
+                                             else values) for side,values in commanded.items()},
+            measured_motor_positions=measured,
             motor_diagnostics=diagnostics,measurement_fresh=snapshot['ready'],
             hardware_hand_commands_sent=bool(sent),hardware_hand_sides=list(sent),fault=fault)
 
@@ -85,10 +88,11 @@ class ManufacturerGrasp:
         sent=[]
         for side in self.ready:
             item=getattr(frame,side)
+            tactile=self.tactile.get(side)
             if self.source_ids[side]!=item.source_id:
                 self.ready[side]=False;self.opening[side]=False;self.open_pressed[side]=False
                 self.source_ids[side]=item.source_id
-            if motion_policy.LIMITS_MANAGED_EXTERNALLY:self.ready[side]=True
+            if motion_policy.LIMITS_MANAGED_EXTERNALLY and tactile is None:self.ready[side]=True
             if not item.connected or not item.tracked or item.pose is None or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and item.release_required):
                 self.ready[side]=False;self.opening[side]=False;self.open_pressed[side]=False
                 self.reasons[side]='tracking_lost_fresh_neutral_required';continue
@@ -98,29 +102,37 @@ class ManufacturerGrasp:
             self.open_pressed[side]=button
             # A fresh open press is an explicit opening intention, but cannot
             # bypass a lost-tracking/reconnect neutral gate.
-            if rising and self.ready[side]:self.opening[side]=True
+            if rising and (self.ready[side] or tactile is not None):self.opening[side]=True
             if self.opening[side]:
                 operation,closure='open',0.
                 self.reasons[side]='opening_to_measured_calibration'
             elif self.ready[side] and not button and item.trigger>.1:
                 operation,closure='close',(item.trigger-.1)/.9
                 self.reasons[side]='closing_with_manufacturer_raw_rate'
+            elif tactile is not None and tactile.phase=='holding':
+                operation,closure='hold',0.
+                self.reasons[side]='holding_with_tactile_feedback'
             else:
                 self.reasons[side]='holding_motor_command' if self.ready[side] else 'fresh_neutral_hand_input_required'
                 continue
             result=self.robot.submit_hand(side,closure,intent_stamp=frame.received_at,operation=operation)
             if not result.accepted:
                 if result.reason=='no_new_hand_intent':continue
+                if tactile is not None:
+                    self.reasons[side]=result.reason
+                    continue
                 self._cancel('manufacturer_hand_output_rejected')
                 return self._status(sent,fault=result.reason)
             sent.append(side)
             with self.robot.lock:
                 diag=dict(self.robot.hand_diagnostics[side])
                 if diag['feedback_limited']:self.reasons[side]='limited_by_measured_motor_feedback_corridor'
+                if tactile is not None:self.reasons[side]=diag['grasp_phase']
                 if operation=='open':
                     opened=self.robot.profiles[side].opened
+                    tolerance=.5 if tactile is None else tactile.config.position_tolerance
                     if (tuple(diag['commanded_positions'])==tuple(opened)
-                            and all(abs(v-g)<=.5 for v,g in zip(diag['measured_positions'],opened))):
+                            and all(abs(v-g)<=tolerance for v,g in zip(diag['measured_positions'],opened))):
                         self.opening[side]=False;self.ready[side]=False
                         self.reasons[side]='measured_open_motor_target_reached_release_inputs'
             if button:self.ready[side]=False

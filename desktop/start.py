@@ -20,6 +20,7 @@ from tg3_pico_dualarm.deployment import RobotDeployment,reviewed_factory_overrid
 from tg3_pico_dualarm.manufacturer_session import load_factory_bundle
 from tg3_pico_dualarm.diagnostics import DiagnosticsSink
 from tg3_pico_dualarm.manual_recording import ManualRecording,discover
+from tg3_pico_dualarm.recording_writer import write_outcome
 from tg3_pico_dualarm.wireless import InputGateway,WirelessServer,GatewayClient,LatestRelay
 from tg3_pico_dualarm.input_policy import NORMAL,policy_for
 from tg3_pico_dualarm.tracking import LatestTracking
@@ -115,6 +116,8 @@ class Desk:
         ttk.Button(actions,text='停用并停止本项目',command=self.stop_async).pack(side='left',padx=2)
         ttk.Button(actions,text='工具标定',command=self.tool_dialog).pack(side='left',padx=2)
         self.enable_button=ttk.Button(actions,text='启用真机运动',command=self.enable);self.enable_button.pack(side='left',padx=2)
+        self.home_button=ttk.Button(actions,text='双臂回初始姿态',command=self.return_home,state='disabled')
+        self.home_button.pack(side='left',padx=2)
         ttk.Button(actions,text='核对接管配置（不发动作）',command=self.read_holding_contract).pack(side='left',padx=2)
         options=ttk.Frame(panel);options.pack(fill='x',pady=4)
         ttk.Label(options,text='运行模式').pack(side='left')
@@ -156,6 +159,11 @@ class Desk:
         self.record_start.pack(side='left',padx=2)
         self.record_stop=ttk.Button(recording,text='停止录制',command=self.stop_recording,state='disabled')
         self.record_stop.pack(side='left',padx=2)
+        self.record_outcome=tk.StringVar(value='未标记')
+        ttk.Combobox(recording,textvariable=self.record_outcome,values=('未标记','成功','失败'),
+                     state='readonly',width=7).pack(side='left',padx=4)
+        self.record_label=ttk.Button(recording,text='保存示范结果',command=self.save_record_outcome,state='disabled')
+        self.record_label.pack(side='left',padx=2)
         self.record_state=tk.StringVar(value='录制关闭；尚未选择保存目录和数据；不影响操控')
         ttk.Label(panel,textvariable=self.record_state,wraplength=1060).pack(anchor='w')
         self.state=tk.StringVar(value='等待头显连接')
@@ -425,9 +433,10 @@ class Desk:
         try:
             path=Path(selected).resolve();digest=hashlib.sha256(path.read_bytes()).hexdigest()
             checked=reviewed_brainco_overrides(path,digest)
-            sides=list(json.loads(checked['config/brainco.json'])['hands'])
+            hand_config=json.loads(checked['config/brainco.json']);sides=list(hand_config['hands'])
             self.hand_config_path,self.hand_config_digest=path,digest
-            self.hand_config_status.set('已加载 '+', '.join(sides)+'；启动后核对实测反馈与控制器竞争')
+            self.hand_config_status.set('已加载 '+', '.join(sides)+
+                ('；右手触觉抓握' if 'right_tactile' in hand_config else '；位置抓握'))
             self.log('灵巧手实测配置已校验；尚未启用输出。')
         except Exception as exc:messagebox.showerror('灵巧手标定未加载',str(exc))
 
@@ -520,9 +529,9 @@ class Desk:
 
     def _rpc_control(self,operation,session,endpoint,generation=None):
         with self._rpc_lock:
-            if operation=='enable' and (self.closed or generation!=self._generation or endpoint!=self.remote_endpoint):
-                raise RuntimeError('connection_changed_enable_request_cancelled')
-            if operation=='enable' and self.deployment and getattr(self.deployment,'network_mode',None)=='wired':
+            if operation in ('enable','return_home') and (self.closed or generation!=self._generation or endpoint!=self.remote_endpoint):
+                raise RuntimeError('connection_changed_'+operation+'_request_cancelled')
+            if operation in ('enable','return_home') and self.deployment and getattr(self.deployment,'network_mode',None)=='wired':
                 self.deployment.verify_network()
             client=GatewayClient(*endpoint)
             try:return client.control(operation,session)
@@ -537,7 +546,7 @@ class Desk:
                 result=self._rpc_control(operation,session,endpoint,generation)
                 self.events.put(('control_result',(operation,result,generation)))
             except Exception as exc:
-                self.log(('使能' if operation=='enable' else '停用')+'请求未确认：'+str(exc))
+                self.log({'enable':'使能','disable':'停用','return_home':'回初始姿态'}[operation]+'请求未确认：'+str(exc))
                 self.events.put(('control_error',(operation,generation)))
                 if operation=='enable':
                     try:self._rpc_control('disable',None,endpoint)
@@ -562,6 +571,10 @@ class Desk:
         self._enable_request_number=None
         self._enable_queued=True
         self._control_worker('enable',session)
+
+    def return_home(self):
+        if self._control_pending or self.home_button.instate(('disabled',)):return
+        self._control_worker('return_home',self.remote_tracking.get('session'))
 
     def tool_dialog(self):
         if self.busy or self.deployment:
@@ -648,7 +661,11 @@ class Desk:
         if not (self._session_credentials and self.record_destination and self.record_topics is not None and self.remote_endpoint):
             messagebox.showinfo('录制未就绪','先连接机器人，再选择保存目录和需要录制的数据。');return
         config=dict(self._session_credentials,destination=self.record_destination,
-            topics=dict(self.record_topics),rate=self.record_rate)
+            topics=dict(self.record_topics),rate=self.record_rate,software=__version__,
+            calibration={'hand_sha256':self.hand_config_digest,
+                         'tool_sha256':hashlib.sha256(json.dumps(
+                             self.tool_config,sort_keys=True).encode('utf-8')).hexdigest()})
+        self.record_outcome.set('未标记')
         endpoint=self.remote_endpoint;generation=self._generation;epoch=self._record_epoch;self._record_pending=True
         def work():
             client=GatewayClient(*endpoint)
@@ -668,6 +685,15 @@ class Desk:
         # The worker drains and finalizes through its own SSH channel. Closing
         # or failing that recording connection has no control authority.
 
+    def save_record_outcome(self):
+        status=self.manual_recording.status
+        outcome={'成功':'success','失败':'failure','未标记':'unlabeled'}[self.record_outcome.get()]
+        try:
+            write_outcome(status['path'],outcome)
+            self._log_ui('已保存示范结果：'+self.record_outcome.get())
+        except (OSError,ValueError) as exc:
+            self._log_ui('示范结果保存失败：'+str(exc))
+
     def _recording_ui(self):
         previous=self.manual_recording.status.get('state');status=self.manual_recording.poll()
         active=self.manual_recording.active or self._record_pending
@@ -675,6 +701,7 @@ class Desk:
             and self.record_destination and self.record_topics is not None and self._connection_mode_running!='USB（机器人直连）')
         self.record_start.configure(text='开始录制（待现场验收）' if ready else '开始录制（未就绪）',state='normal' if ready and not active else 'disabled')
         self.record_stop.configure(state='normal' if active else 'disabled')
+        self.record_label.configure(state='normal' if status.get('complete') and not active else 'disabled')
         labels={'off':'关闭','checking':'检查磁盘和带宽','recording':'正在录制','stopping':'正在停止并封存','error':'失败，该段数据不完整'}
         self.record_state.set('录制：'+labels.get(status['state'],status['state'])+'；位置：'+str(status.get('path',self.record_destination or '未选择'))+
             f"；时长 {status.get('duration_s',0):.0f}秒；数据 {status.get('bytes',0)/1024**2:.1f}MiB"+
@@ -816,7 +843,8 @@ class Desk:
             elif kind=='control_result':
                 operation,result,generation=value
                 if generation!=self._generation:continue
-                self._log_ui(('使能' if operation=='enable' else '停用')+'响应：'+json.dumps(result,ensure_ascii=False))
+                self._log_ui({'enable':'使能','disable':'停用','return_home':'回初始姿态'}[operation]+
+                             '响应：'+json.dumps(result,ensure_ascii=False))
                 if operation=='enable' and result.get('accepted') and result.get('queued'):
                     self._enable_request_number=result.get('request_number')
                     self._log_ui('请求仅已入队；以随后实时“armed／holding”及厂家确认判断输出状态。')
@@ -866,7 +894,19 @@ class Desk:
         can_enable=bool(mode=='hardware' and ready.get('ready_to_request_motion') and not stale and phase in ('disabled','failed')
             and not self._enable_queued and not self._control_pending)
         self.enable_button.configure(state='normal' if can_enable else 'disabled')
+        current=runtime.get('control',{})
+        home_state=current.get('return_home')
+        can_return=bool(mode=='hardware' and phase in ('enabled','following') and not stale
+            and current.get('home_available') and home_state not in ('returning','waiting_for_release')
+            and self.remote_tracking.get('session') and not self._control_pending)
+        self.home_button.configure(state='normal' if can_return else 'disabled')
         self.timing_state.set(timing_summary(self.remote_tracking,runtime,self.relay.status if self.relay else None))
+        right_hand=((runtime.get('control',{}).get('hands') or {}).get('motor_diagnostics') or {}).get('right',{})
+        grasp_phase={'opening_fingers':'张指','opening_thumb':'拇指归位','opposing_thumb':'拇指对掌',
+            'closing':'包握','holding':'触觉持握','hold_position':'位置保持','waiting_for_tactile':'等待右手触觉数据'}
+        home_text={'returning':'双臂正在回初始姿态','arrived':'双臂已到初始姿态',
+                   'waiting_for_release':'回位已中止，请松开手柄按键','cancelled':'回位已取消'}
+        home_result=processed.get('reason') if processed.get('operation')=='return_home' and processed.get('accepted') is False else None
         self.state.set('头部：'+str(tracking['head_tracked'])+'   左手：'+str(tracking['left_tracked'])+
             '   右手：'+str(tracking['right_tracked'])+'   已收帧：'+str(tracking.get('counters',{}).get('accepted',0))+
             '   输入转发：'+('USB直达机器人' if direct_usb else self.relay.status['state'] if self.relay else '尚未启动')+
@@ -876,7 +916,10 @@ class Desk:
             '   数据录制：'+str(self.manual_recording.status['state'])+
             '\n握持值：左 '+str(tracking.get('left_grip','待测'))+'，右 '+str(tracking.get('right_grip','待测'))+
             '   跟随原因：'+str(runtime.get('control',{}).get('reasons',{}))+
-            '\n录制独立于操控；机器人不保存整份数据副本。')
+            ('\n'+home_text[home_state] if home_state in home_text else '')+
+            ('\n回位请求未执行：'+home_result if home_result else '')+
+            ('\n右手：'+grasp_phase.get(right_hand['grasp_phase'],right_hand['grasp_phase'])
+             if 'grasp_phase' in right_hand else ''))
         self._recording_ui()
         blockers=ready.get('blockers')
         if blockers is None:

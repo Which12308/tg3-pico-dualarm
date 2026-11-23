@@ -91,6 +91,7 @@ class DatasetWriter:
         self.closed=True
         try:
             self._finish_segment();self._manifest('error' if error else 'complete',reason=error)
+            if not error:write_outcome(self.directory,'unlabeled')
         finally:
             for stream in (self.file,self.jsonfile):
                 if stream:
@@ -99,3 +100,14 @@ class DatasetWriter:
 
     def size_bytes(self):
         return sum(p.stat().st_size for p in self.directory.iterdir() if p.is_file())
+def write_outcome(directory, outcome):
+    """Label a finalized episode without rewriting its data or manifest."""
+    if outcome not in ('success','failure','unlabeled'):
+        raise ValueError('unknown_episode_outcome')
+    directory=Path(directory)
+    manifest=json.loads((directory/'session.json').read_text(encoding='utf-8'))
+    if manifest['state']!='complete':
+        raise ValueError('episode_is_not_complete')
+    temporary=directory/'outcome.json.tmp'
+    temporary.write_text(json.dumps(dict(outcome=outcome),ensure_ascii=False)+'\n',encoding='utf-8')
+    temporary.replace(directory/'outcome.json')

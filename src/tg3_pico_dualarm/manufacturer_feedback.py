@@ -12,6 +12,7 @@ import time
 
 from .preflight import parse_arm_positions, parse_fsm
 from .robot import RobotState
+from .tactile_grasp import touch_values
 
 
 POWER_KEY_TOPIC='/power/board/key_status'
@@ -102,6 +103,7 @@ class ManufacturerFeedback:
         self.positions=self.arm_stamp=self.mode=self.mode_stamp=None
         self.power_keys=None
         self.hands=dict.fromkeys(('left','right'))
+        self.right_touch=None
         self.errors={}
         self.subscriptions=[]
         self.node=None
@@ -154,6 +156,16 @@ class ManufacturerFeedback:
             except (ValueError,TypeError,OverflowError) as exc:
                 self.power_keys=None;self.errors['power_key_status']=str(exc)
 
+    def touch(self,message):
+        with self.lock:
+            try:
+                values=touch_values(message)
+                if self.right_touch is None or values['sequence']!=self.right_touch['sequence']:
+                    self.right_touch=dict(values,received_at=self.clock())
+                self.errors.pop('right_hand_touch',None)
+            except (AttributeError,TypeError,ValueError) as exc:
+                self.right_touch=None;self.errors['right_hand_touch']=str(exc)
+
     @staticmethod
     def _fresh(stamp,now,limit):return stamp is not None and 0<=now-stamp<=limit
 
@@ -203,6 +215,8 @@ class ManufacturerFeedback:
                                  state_semantics_source=BRAINCO_MOTOR_STATE_SOURCE)
                 if side in required and not fresh:issues.append(side+'_hand_feedback_missing_or_stale')
                 if side in required and value and not position_safe:issues.append(side+'_hand_motor_state_not_safe_for_position_control')
+            if self.right_touch and self._fresh(self.right_touch['received_at'],now,self.hand_timeout):
+                hands['right']['touch']=self.right_touch.copy()
             return dict(ready=not issues,issues=issues,positions=self.positions,arm_stamp=self.arm_stamp,
                 mode=dict(self.mode) if self.mode else None,hands=hands,errors=self.errors.copy(),
                 physical_estop=estop,physical_estop_source=POWER_KEY_SOURCE,
@@ -252,6 +266,12 @@ class ManufacturerFeedback:
                 self.subscriptions.append(node.create_subscription(cls,topic,callback,qos_profile_sensor_data))
             if power_class is not None:
                 self.subscriptions.append(node.create_subscription(power_class,POWER_KEY_TOPIC,self.key_status,qos_profile_sensor_data))
+            try:
+                from brainco_hand_msgs.msg import TouchStatus
+                self.subscriptions.append(node.create_subscription(
+                    TouchStatus,'/right_hand/touch_status',self.touch,qos_profile_sensor_data))
+            except (ImportError,RuntimeError,TypeError) as exc:
+                self.errors['right_hand_touch']=str(exc)
         except BaseException:
             self.close();raise
         return self

@@ -70,6 +70,7 @@ def worker(config,stop,status):
         if stop.is_set():raise RuntimeError('recording_start_cancelled')
         writer=DatasetWriter(config['destination'],dict(topics=config['topics'],rate_limit_bytes_s=rate,
             write_probe_bytes_s=write_rate,network_probe_bytes_s=network_rate,
+            calibration=config.get('calibration',{}),software=config.get('software'),
             time_basis='ROS source/header and Unix wall receive timestamps; monotonic clocks are host-local'))
         buffer=ByteQueue();reader_error=[];ended=threading.Event()
         def receive():

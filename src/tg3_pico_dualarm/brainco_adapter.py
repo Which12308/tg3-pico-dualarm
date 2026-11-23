@@ -15,6 +15,7 @@ import time
 from .hands import HandCalibration
 from .manufacturer_feedback import ManufacturerFeedback
 from .robot import SubmitResult
+from .tactile_grasp import TactileCalibration, TactileGrasp
 
 
 def hand_schema(message_type):
@@ -39,35 +40,41 @@ def _fits(values,field):
     return all(type(value) is int and low<=value<=high for value in values)
 
 
-def encode_hand(message_type,fields,profile,positions):
+def encode_hand(message_type,fields,profile,positions,*,current_mode=None,currents=None):
     positions=tuple(positions)
     if len(positions)!=6 or any(type(value) is not int or (not motion_policy.LIMITS_MANAGED_EXTERNALLY and not low<=value<=high)
             for value,low,high in zip(positions,profile.lower,profile.upper)):
         raise ValueError('hand_target_outside_measured_limits')
     # mode 1 controls positions; the historical current_limit profile name
     # fills the current command field, not SDK service mode-7 protection.
-    values=dict(positions=positions,speeds=profile.speed,currents=profile.current_limit)
+    if current_mode is None:
+        mode=1
+        values=dict(positions=positions,speeds=profile.speed,currents=profile.current_limit)
+    else:
+        mode=current_mode
+        values=dict(positions=(0,)*6,speeds=(0,)*6,currents=currents)
     values['pwm' if 'pwm' in fields else 'pwms']=(0,)*6
     if 'durations' in fields:values['durations']=(0,)*6
-    message=message_type();message.mode=1
+    message=message_type();message.mode=mode
     for name,value in values.items():
         if not _fits(value,fields[name]):raise ValueError('BrainCo_field_range_mismatch:'+name)
         setattr(message,name,list(value))
     return message
 
 
-def limit_hand_target(profile,closure,*,operation,previous,floating,measured,raw_rate,raw_lead,dt):
+def limit_hand_target(profile,closure,*,operation,previous,floating,measured,raw_rate,raw_lead,dt,positions=None):
     """The shared six-channel factory limiter; floating residuals accumulate."""
     if operation not in (None,'close','open'):raise ValueError('unknown_hand_operation')
     if motion_policy.LIMITS_MANAGED_EXTERNALLY:
-        requested=tuple(profile.positions(closure))
+        requested=tuple(profile.positions(closure) if positions is None else positions)
         values=tuple(old if operation=='close' and (goal-old)*(closed-opened)<0 else goal
             for old,goal,opened,closed in zip(previous,requested,profile.opened,profile.closed))
         return values,tuple(map(float,values)),dict(commanded_positions=values,measured_positions=tuple(measured),
             feedback_limited=False,feedback_limited_channels=(False,)*6,limits_owner='external',operation=operation,
             requested_positions=requested,effective_positions=values,command_target_reached=True)
     if not 0<dt<=.05:raise ValueError('nonadvancing_hand_clock')
-    target=profile.positions(closure);values=[];next_float=[];limited=[];effective=[]
+    target=profile.positions(closure) if positions is None else positions
+    values=[];next_float=[];limited=[];effective=[]
     for index,(old,goal) in enumerate(zip(floating,target)):
         lead=raw_lead[index]
         if abs(previous[index]-measured[index])>lead+1e-9:raise ValueError('hand_feedback_lead_violation')
@@ -109,9 +116,10 @@ def load_brainco_config(path):
     Missing/invalid side data stays visible to the adapter's disabled report.
     """
     value=json.loads(Path(path).read_text(encoding='utf-8'))
-    if not isinstance(value,dict) or set(value)-{'hands','hand_raw_rate','hand_raw_lead'}:
+    if not isinstance(value,dict) or set(value)-{'hands','hand_raw_rate','hand_raw_lead','right_tactile'}:
         raise ValueError('invalid_BrainCo_configuration_fields')
-    return dict(profiles=value.get('hands'),hand_raw_rate=value.get('hand_raw_rate'),hand_raw_lead=value.get('hand_raw_lead'))
+    return dict(profiles=value.get('hands'),hand_raw_rate=value.get('hand_raw_rate'),
+                hand_raw_lead=value.get('hand_raw_lead'),right_tactile=value.get('right_tactile'))
 
 
 def _positive_six(values,name):
@@ -130,7 +138,7 @@ def validate_brainco_config(value):
     for every selected side and must not accept unrelated configuration files.
     """
     required={'hands','hand_raw_rate','hand_raw_lead'}
-    if not isinstance(value,dict) or set(value)!=required:
+    if not isinstance(value,dict) or set(value)-{'right_tactile'}!=required:
         raise ValueError('BrainCo_config_requires_exact_hands_hand_raw_rate_hand_raw_lead_fields')
     if any(not isinstance(value[name],dict) for name in required):
         raise ValueError('BrainCo_configuration_sections_must_be_side_mappings')
@@ -148,8 +156,12 @@ def validate_brainco_config(value):
             _positive_six(value['hand_raw_rate'][side],'hand_raw_rate')
             lead=_positive_six(value['hand_raw_lead'][side],'hand_raw_lead')
             measured_projection(measured,measured.opened,lead)
+            if side=='right' and 'right_tactile' in value:
+                TactileCalibration(**value['right_tactile']).match_positions(measured)
         except (ValueError,TypeError,OverflowError) as exc:
             raise ValueError(side+'_hand_configuration_invalid:'+str(exc)) from exc
+    if 'right_tactile' in value and 'right' not in sides:
+        raise ValueError('right_tactile_requires_right_hand_calibration')
     return sorted(sides)
 
 
@@ -162,7 +174,7 @@ class BrainCoHandAdapter:
     Message injection is for explicit offline tests only.
     """
     def __init__(self,node,feedback,*,parent,profiles=None,hand_raw_rate=None,hand_raw_lead=None,
-                 config_path=None,message_type=None,clock=time.monotonic,command_timeout=.1):
+                 config_path=None,message_type=None,clock=time.monotonic,command_timeout=.1,right_tactile=None):
         if not isinstance(feedback,ManufacturerFeedback):raise TypeError('manufacturer_feedback_required')
         if not all(callable(getattr(parent,name,None)) for name in ('_fresh_status','_feedback_ok')):
             raise TypeError('audited_XARM_parent_required')
@@ -173,12 +185,14 @@ class BrainCoHandAdapter:
         self.profiles={};self.hand_raw_rate={};self.hand_raw_lead={};self.disabled_reasons={}
         load_error=None
         if config_path is not None:
-            if any(value is not None for value in (profiles,hand_raw_rate,hand_raw_lead)):
+            if any(value is not None for value in (profiles,hand_raw_rate,hand_raw_lead,right_tactile)):
                 raise ValueError('provide_hand_config_path_or_explicit_profiles')
             try:
                 loaded=load_brainco_config(config_path)
                 profiles,hand_raw_rate,hand_raw_lead=(loaded[name] for name in ('profiles','hand_raw_rate','hand_raw_lead'))
+                right_tactile=loaded['right_tactile']
             except (OSError,ValueError,TypeError) as exc:load_error='hand_configuration_unavailable:'+type(exc).__name__
+        self.tactile={}
         for side in ('left','right'):
             try:
                 if load_error:raise ValueError(load_error)
@@ -189,6 +203,10 @@ class BrainCoHandAdapter:
                 rate=_positive_six(hand_raw_rate.get(side) if isinstance(hand_raw_rate,dict) else None,'hand_raw_rate')
                 lead=_positive_six(hand_raw_lead.get(side) if isinstance(hand_raw_lead,dict) else None,'hand_raw_lead')
                 measured_projection(profile,profile.opened,lead)
+                if side=='right' and right_tactile is not None:
+                    tactile=TactileCalibration(**right_tactile)
+                    tactile.match_positions(profile)
+                    self.tactile[side]=TactileGrasp(tactile,profile)
                 self.profiles[side]=profile;self.hand_raw_rate[side]=rate;self.hand_raw_lead[side]=lead
             except (ValueError,TypeError) as exc:self.disabled_reasons[side]=str(exc)
         self.message_type=message_type;self.hand_fields=None;self.hand_publishers={};self._publisher_gids={}
@@ -269,14 +287,36 @@ class BrainCoHandAdapter:
                     raise ValueError('stale_or_invalid_hand_intent')
                 if not motion_policy.LIMITS_MANAGED_EXTERNALLY and side in self._last_hand_intent and intent_stamp<=self._last_hand_intent[side]:return SubmitResult(False,'no_new_hand_intent')
                 self._check_publishers(side)
-                values,floating,diagnostics=limit_hand_target(self.profiles[side],closure,operation=operation,
-                    previous=self.hand_positions[side],floating=self._hand_float[side],measured=snapshot['hands'][side]['feedback']['positions'],
-                    raw_rate=self.hand_raw_rate[side],raw_lead=self.hand_raw_lead[side],dt=min(.05,now-self._last_hand_output[side]))
-                message=encode_hand(self.message_type,self.hand_fields,self.profiles[side],values)
+                measured=snapshot['hands'][side]['feedback']['positions']
+                tactile=self.tactile.get(side)
+                positions=currents=current_mode=None
+                tactile_status={}
+                if tactile is not None:
+                    touch=snapshot['hands'][side].get('touch')
+                    phase,positions,currents=tactile.propose(operation,closure,measured,self.hand_positions[side],touch)
+                    tactile_status=dict(grasp_phase=phase,trigger_closure=closure,touch=touch)
+                    if positions is None:
+                        self.hand_diagnostics.setdefault(side,{}).update(tactile_status)
+                        return SubmitResult(False,'no_new_hand_intent')
+                    if currents is not None:
+                        current_mode=tactile.config.current_mode
+                        tactile_status['commanded_currents']=currents
+                if currents is None:
+                    values,floating,diagnostics=limit_hand_target(self.profiles[side],closure,
+                        operation=operation if tactile is None else None,
+                        previous=self.hand_positions[side],floating=self._hand_float[side],measured=measured,
+                        raw_rate=self.hand_raw_rate[side],raw_lead=self.hand_raw_lead[side],
+                        dt=min(.05,now-self._last_hand_output[side]),positions=positions)
+                else:
+                    values=positions;floating=tuple(map(float,measured))
+                    diagnostics=dict(operation=operation,commanded_positions=None,measured_positions=values,
+                                     feedback_limited=False,command_target_reached=False)
+                message=encode_hand(self.message_type,self.hand_fields,self.profiles[side],values,
+                                    current_mode=current_mode,currents=currents)
                 self._parent_guard();self._check_publishers(side)
                 self.hand_publishers[side].publish(message)
                 self.hand_positions[side]=values;self._hand_float[side]=floating;self._last_hand_output[side]=now
-                self._last_hand_intent[side]=intent_stamp;self.hand_diagnostics[side]=diagnostics
+                self._last_hand_intent[side]=intent_stamp;self.hand_diagnostics[side]=dict(diagnostics,**tactile_status)
                 return SubmitResult(True,'published_calibrated_hand_from_measured_pose')
             except Exception as exc:
                 if motion_policy.LIMITS_MANAGED_EXTERNALLY:
@@ -303,6 +343,7 @@ class BrainCoHandAdapter:
     def invalidate(self,reason='hand_input_invalidated_hold_last_command'):
         with self.lock:
             self.initialized=False;self.reason=reason;self._last_hand_intent={};self._publisher_gids={}
+            for grasp in self.tactile.values():grasp.reset()
             errors=[]
             for side,publisher in list(self.hand_publishers.items()):
                 try:
@@ -317,5 +358,6 @@ class BrainCoHandAdapter:
     def status(self):
         with self.lock:
             return dict(enabled=self.hardware_writes_enabled,reason=self.reason,configured_sides=list(self.profiles),
+                tactile_sides=list(self.tactile),
                 disabled_sides=dict(self.disabled_reasons),hand_positions=dict(self.hand_positions),
                 hand_diagnostics=dict(self.hand_diagnostics),automatic_open_on_close=False)

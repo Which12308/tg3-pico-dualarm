@@ -32,6 +32,8 @@ def motion_view(runtime,mode,*,queued=False,stale=False,request_error=None):
     if state in ('releasing','holding') and not ready.get('hardware_motion_enabled'):
         return 'stopping','正在停用；等待厂家停止、释放及原模式恢复确认。'
     if ready.get('hardware_motion_enabled') is True and motion.get('hardware_motion_enabled',True) is True and state in ('armed','holding'):
+        if runtime.get('control',{}).get('return_home')=='returning':
+            return 'enabled','双臂正在回初始姿态。按下手柄按键可中止。'
         holds=runtime.get('control',{}).get('safety',{}).get('boundary_holds',[])
         if holds:
             names='、'.join('左臂' if h['side']=='left' else '右臂' for h in holds)

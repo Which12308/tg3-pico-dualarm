@@ -195,12 +195,19 @@ def run(args, stop=None):
                         # explicit enable. Protect the complete acquisition
                         # before requesting any factory mutation.
                         if action['operation']=='enable':watchdog.activate()
-                        if not motion_policy.LIMITS_MANAGED_EXTERNALLY and action['operation']=='enable' and not 0<=time.monotonic()-action['requested_at']<=.12:
+                        if action['operation']=='return_home':
+                            if admission.initial_hold_pending or not 0<=time.monotonic()-action['requested_at']<=.12:
+                                request_result=dict(accepted=False,reason='return_home_request_unavailable')
+                            else:
+                                request_result=controller.request_home(gateway.tracking.sample(),action['session'])
+                            recorder.event('operator_return_home:'+request_result['reason'],time.monotonic())
+                        elif not motion_policy.LIMITS_MANAGED_EXTERNALLY and action['operation']=='enable' and not 0<=time.monotonic()-action['requested_at']<=.12:
                             request_result=dict(accepted=False,reason='motion_request_expired')
                         else:
                             request_result=admission.request(action['operation'],frame,expected_session=action['session'])
                             recorder.event('operator_'+action['operation']+':'+request_result['reason'],time.monotonic())
-                        request_result=dict(request_result,request_number=action['request_number'],attempt_id=admission.attempt_id)
+                        request_result=dict(request_result,operation=action['operation'],
+                            request_number=action['request_number'],attempt_id=admission.attempt_id)
                     if admission.consume_enable_ack():controller.reseed_after_hardware_enable()
                     if admission.validated_frame is not None:frame=admission.validated_frame
                 timing.add('admission_processing',time.monotonic()-admission_started)
@@ -220,7 +227,7 @@ def run(args, stop=None):
                     if controller.last_status.get('state')=='disarmed':
                         status['last_control_failure']=controller.last_status.copy()
                 else:
-                    status=controller.tick(frame,elapsed)
+                    status=controller.tick(frame,elapsed,record_task_space=gateway.recording_capture_active)
                 if engine.faulted and not motion_policy.LIMITS_MANAGED_EXTERNALLY:
                     raise RuntimeError('native_ik_worker_fault:'+str(engine.fault_reason))
                 actual_feedback={}
